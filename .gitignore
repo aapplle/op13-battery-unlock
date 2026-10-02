@@ -1,0 +1,20 @@
+# 构建产物（如需可自行编译）
+*.o
+*.mod
+*.mod.c
+*.symvers
+*.order
+.tmp_versions/
+Module.symvers
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# 本地临时
+*.tmp
+*.log
+!archive_deprecated/*.log
