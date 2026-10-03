@@ -439,3 +439,39 @@ work 捕获拿不到任何 getter 给不了的能力，反而多一个 hook 点�
 不自愈（需充满一次恢复）；且 shutdown 必须 ≥ ADSP term 并留余量，否则 SOC/关机行为异常。
 若实现需：范围钳制 2700~3400 + 强制 `shutdown > adsp_force` 校验 + 默认 2800 + 文档标风险。
 **判断：收益小于风险，默认不开放。**
+
+### H10.7 v10.6 回归与修正：`adsp_force` 方案判死，`adsp_write` 回归
+
+v10.5 实测**标准模式解耦失效**（ADSP 停 3250、fcc 不增长），暴露 `adsp_force` 设计的
+根本性错误。经完整实测链（标准模式 + 模拟越狱）确证：
+
+**① `adsp_force`（setter hook 强制值）两种模式都不可用**
+
+| 实验 | 结果 |
+|---|---|
+| 标准模式设 `adsp_force=2600`，全程观察 | ADSP 始终 3250，setter hook 没写入 ❌ |
+| 模拟越狱插拔充电器触发 vote | getter 捕获 uv_dev，但 ADSP 仍 3250 ❌ |
+| 同状态 `adsp_write 2600`（主动）| 立即 3250→2600 ✅ |
+
+根因：setter hook 是**被动拦截**，只在「驱动主动调 setter 写 term」时才有机会改值；
+而驱动只在「vote 目标 ≠ 当前 ADSP」时才写，日常 vote 目标=3250=ADSP 原值，值相同
+**驱动不写 → hook 全程不触发**。`adsp_force` 改的寄存器从没被写入硬件。
+
+**② 「`adsp_write` 在越狱模式不可用」是此前的错误结论**
+
+实测：模拟越狱下插拔充电器 → getter 捕获 `uv_dev` → `adsp_write` 自由读写 3250↔2600。
+**`adsp_write` 本身两种模式完全可用**，唯一前提是 `uv_dev` 已捕获。越狱模式的真正问题
+从来不是 `adsp_write`，而是「`uv_dev` 没捕获」——插拔一次充电器捕获后即正常。
+
+**③ v10.6 最终形态**
+
+- 内核**回退 v10**（`0273103a`，已验证稳定，5 个 kprobe，`UV_TARGET_MV` 固定 2800）；
+  v10.4（`adsp_force`）归档 `_work/uv2800/archive_deprecated/`。
+- service.sh **恢复 v10.3 的 `adsp_write` 主动写 + `adsp_retry`**（越狱模式等 uv_dev 捕获
+  后补写——`adsp_retry` 是必要的，v10.5 误删）；
+- **保留** v10.5 的脚本打磨：customize.sh（安装提示）、action.sh 超时硬中止、
+  module.prop/late-load 文案、`KSU_LATE_LOAD` 分支隔离。
+
+**教训**：「被动 hook 拦截」与「主动函数调用」是两条本质不同的路径。hook 改寄存器
+只在目标指令**被执行**时生效；驱动不执行的写路径，hook 改什么都没用。任何「等驱动
+自己来做」的设计都必须先确证「驱动在那个时机真的会做」。

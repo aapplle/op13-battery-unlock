@@ -71,12 +71,14 @@
 ### 步骤
 
 ```
-1) 用 KernelSU 管理器刷入 一加13解容-v10.5.zip
+1) 用 KernelSU 管理器刷入 一加13解容-v10.6.zip
 2) 重启                                    ← 唯一需要的一次重启
 3) 模块开机后自动写入电量计 term
    ⚠️ 越狱(late-load)模式：模块加载太晚，错过了驱动开机那次 vote，
-      需【插拔一次充电器】触发 vote（setter 写解耦目标 + getter 捕获回写指针）
+      需【插拔一次充电器】触发 vote（getter 捕获回写指针 uv_dev，随后脚本主动 adsp_write 解耦）
       无时间限制，任意时刻插拔一次即可；不插拔不影响关机保护(2800mV)
+      ★ 一次插拔双用：同一次开机内「安装解耦」与「卸载回写」共用这次捕获，
+        无需重复插拔；但重启后需重新插拔一次
 4) 触发一次满电状态切换（三选一）：
      · 充满一次
      · SOC=100 时拔掉充电器
@@ -90,9 +92,13 @@
 cat /sys/class/oplus_chg/battery/vbat_uv            # 应为 2800
 P=/sys/module/uv2800/parameters
 echo 1 > $P/adsp_read; cat $P/adsp_read             # 2600（或 2800）
-cat /sys/class/oplus_chg/battery/battery_fcc        # ~5000（解容后）
-dmesg | grep "uv2800:"                              # v10.4 ready, 5 个 hook
+dmesg | grep "uv2800:"                              # v10 ready, 5 个 hook
+dmesg | grep bs_update_data | tail -1               # fcc ≈5000 ★唯一可靠指标
 ```
+
+> ⚠️ **不要用 `battery_fcc` 节点验证**：它每次读都实时查询 gauge IC，查询失败时
+> （`oplus_get_gauge_type` 返回 `-ENOTSUPP`）会**回退到 `design_capacity`**，
+> 显示的不是电量计真实 fcc。请用驱动 `bs_update_data` 日志里的 `fcc`。
 
 ---
 
@@ -142,19 +148,16 @@ dmesg | grep "uv2800:"                              # v10.4 ready, 5 个 hook
 
 ```
 .
-├── PROJECT-vbat_uv-2800.md   主文档：当前技术栈 + 踩坑清单（25 条）
-├── PROJECT-history.md        历史档案：v1~v9.2 演进、判死路线、实测证据
+├── PROJECT-vbat_uv-2800.md   主文档：当前技术栈 v10.6 + 踩坑清单
+├── PROJECT-history.md        历史档案：v1~v10.6 演进、判死路线、实测证据
 └── _work/
     ├── ksu-module/
-    │   ├── uv2800/           KernelSU 模块源（7 个文件）
-    │   ├── 一加13解容-v10.5.zip    ★ 当前发布包
-    │   └── uv2800.zip        v9.2 发布包（保留）
+    │   ├── uv2800/           KernelSU 模块源（8 个文件）
+    │   ├── 一加13解容-v10.6.zip    ★ 当前发布包
+    │   └── uv2800.zip        早期发布包（保留）
     └── uv2800/
-        ├── uv2800_v10.4.c   ★ 当前内核源码（含 adsp_force 参数）
-        ├── uv2800_v10.4.ko
-        ├── Makefile
-        ├── archive_deprecated/   旧版本源码 v3~v13（.c + .ko）
-        └── docs/                 实测图表（放电曲线 / 对比图）
+        └── archive_deprecated/   旧版本源码 v3~v13（.c + .ko）
+                                  v10.6 使用其中的 v10 源码（无 adsp_force 参数）
 ```
 
 > 文档里引用的部分 `_work/` 路径（`tools/`、`tests/`、`versions/`、`v10/PROJECT-...-full-v44.md`）

@@ -52,40 +52,79 @@ case "$ADSP_TARGET" in
     *) ADSP_TARGET=$ADSP_TARGET_DEFAULT ;;
 esac
 
-# --- 2) ★ 原生 SOC 校准：解耦目标同步到内核 adsp_force ---------------------
-# v10.5 起：日常解耦【不再】用 adsp_write（依赖 uv_dev，越狱模式失效），
-# 改为把 ADSP_TARGET 同步到内核 adsp_force 参数（setter hook 强制值）。
-# 此后驱动每次 vote 终止电压（开机 vote / 充电状态变化 vote）都会被
-# setter hook 强制成 adsp_force —— 与 uv_dev 无关，两种模式统一。
+# --- 2) ★ 原生 SOC 校准：解耦写入电量计终止电压（adsp_write 主动写）---------
+# 【v10.6 机制回归实测修正】解耦写入【唯一可靠路径】是模块主动 adsp_write：
+#   驱动只在「vote 目标 != 当前 ADSP」时才调 setter 写 term，日常 vote 目标=3250
+#   =ADSP 原值，值相同驱动不写 -> setter hook（无论强制 2800 还是 adsp_force）
+#   全程不触发 -> 被动拦截路线在标准/越狱两模式均【无效】。只有 adsp_write 主动
+#   调 oplus_fg_set_deep_term_volt(uv_dev, 2600) 才会真正写进 ADSP。
+# 【两种模式统一用 adsp_write】，区别只在 uv_dev 是否已捕获：
+#   ① 标准模式：开机 vote 时 getter 已捕获 uv_dev -> 直接 adsp_write 写 2600。
+#   ② 越狱模式：开机 vote 已错过，uv_dev=NULL -> 需插拔一次充电器触发 vote
+#      （getter 捕获 uv_dev）后，再由 adsp_retry 后台补写 adsp_write 2600。
+#      （即 v10.3 的 adsp_retry 是【必要】的，v10.5 误删，已恢复）
 # 电量计【实时读取】ADSP term，但 fcc 重算仍需一次满电状态切换。
-if [ -f "$BK/no_adsp_write" ]; then
-    echo "uv2800: 检测到 no_adsp_write 标记，本次不同步解耦目标（测试用）"
-elif [ -w "$P/adsp_force" ]; then
-    # 备份首次见到的原始 term（供卸载回写），需 uv_dev 就绪才能直读
-    echo 1 > "$P/adsp_read" 2>/dev/null
-    _orig=$(cat "$P/adsp_read" 2>/dev/null)
-    if [ -n "$_orig" ] && [ "$_orig" -gt 2000 ] 2>/dev/null && [ ! -f "$BK/adsp_orig.txt" ]; then
-        echo "$_orig" > "$BK/adsp_orig.txt"
-        echo "uv2800: 已备份电量计原始终止电压 = ${_orig} mV"
-    fi
-    _cur_force=$(cat "$P/adsp_force" 2>/dev/null)
-    if [ "$_cur_force" != "$ADSP_TARGET" ]; then
-        echo "$ADSP_TARGET" > "$P/adsp_force"
-        echo "uv2800: 解耦目标 adsp_force ${_cur_force} -> ${ADSP_TARGET} mV（vote 触发后写入电量计）"
-    else
-        echo "uv2800: 解耦目标已是 ${ADSP_TARGET} mV，无需同步"
-    fi
-    # 越狱模式提示：uv_dev 未就绪（无法直读）说明开机 vote 已错过，
-    # 需插拔一次充电器触发 vote，让 setter hook 把 adsp_force 写进电量计
-    if [ "$KSU_LATE_LOAD" = "1" ]; then
+
+# 越狱/未就绪时的后台补写：等 uv_dev 捕获（用户插拔充电器）后主动 adsp_write。
+adsp_retry() {
+    _i=0
+    while [ "$_i" -lt 240 ]; do          # 最多等 240 x 15s = 1 小时
+        sleep 15
         echo 1 > "$P/adsp_read" 2>/dev/null
-        _rdy=$(cat "$P/adsp_read" 2>/dev/null)
-        if [ -z "$_rdy" ] || [ "$_rdy" -le 2000 ] 2>/dev/null; then
-            echo "uv2800: ⚠️ 越狱模式：开机 vote 已错过，请【插拔一次充电器】完成解耦"
+        _c=$(cat "$P/adsp_read" 2>/dev/null)
+        if [ -n "$_c" ] && [ "$_c" -gt 2000 ] 2>/dev/null; then
+            if [ "$_c" != "$ADSP_TARGET" ]; then
+                [ -f "$BK/adsp_orig.txt" ] || echo "$_c" > "$BK/adsp_orig.txt"
+                echo "$ADSP_TARGET" > "$P/adsp_write" 2>/dev/null
+                echo "uv2800: [补写] 模块已就绪，电量计终止电压 $_c -> ${ADSP_TARGET} mV（满电状态切换后重算 fcc）"
+            else
+                echo "uv2800: [补写] 电量计终止电压已是 ${ADSP_TARGET} mV，无需写入"
+            fi
+            return 0
         fi
+        _i=$((_i+1))
+    done
+    echo "uv2800: [补写] 等待超时（1 小时），请插拔一次充电器或在管理器点「执行」"
+    return 1
+}
+
+if [ -f "$BK/no_adsp_write" ]; then
+    echo "uv2800: 检测到 no_adsp_write 标记，本次不写电量计终止电压（测试用）"
+elif [ -w "$P/adsp_read" ]; then
+    # 探测 uv_dev 是否就绪（能直读真实值）。标准模式给 60s 余量等开机 vote。
+    i=0; cur=""
+    while [ $i -lt 60 ]; do
+        echo 1 > "$P/adsp_read" 2>/dev/null
+        cur=$(cat "$P/adsp_read" 2>/dev/null)
+        [ -n "$cur" ] && [ "$cur" -gt 2000 ] 2>/dev/null && break
+        cur=""
+        sleep 1
+        i=$((i+1))
+    done
+
+    if [ -n "$cur" ]; then
+        # ① uv_dev 就绪：主动写入
+        if [ "$cur" != "$ADSP_TARGET" ]; then
+            if [ ! -f "$BK/adsp_orig.txt" ]; then
+                echo "$cur" > "$BK/adsp_orig.txt"
+                echo "uv2800: 已备份电量计原始终止电压 = ${cur} mV"
+            fi
+            echo "$ADSP_TARGET" > "$P/adsp_write"
+            echo "uv2800: 电量计终止电压 ${cur} -> ${ADSP_TARGET} mV（满电状态切换后重算 fcc）"
+        else
+            echo "uv2800: 电量计终止电压已是 ${ADSP_TARGET} mV，无需写入"
+        fi
+    else
+        # ② uv_dev 未就绪：越狱模式提示插拔 + 后台补写
+        if [ "$KSU_LATE_LOAD" = "1" ]; then
+            echo "uv2800: ⚠️ 越狱模式：开机 vote 已错过（uv_dev 未捕获）"
+            echo "uv2800:    请【插拔一次充电器】（无时间限制），后台将自动补写解耦"
+        else
+            echo "uv2800: 读不到电量计终止电压（uv_dev 未就绪），后台补写等待中"
+        fi
+        adsp_retry &
     fi
 fi
-
 # --- 3) ★ 显示真实电量：bind-mount chip_soc -> capacity ---------------
 # 官方 capacity 走的是 OPPO oplus_comm 那一层的平滑值，高负载持续放电时会
 # 严重滞后（实测 13W 放电 22 分钟，真实 79% 而显示 91%，差 13 个点）。
