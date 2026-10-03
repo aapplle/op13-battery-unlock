@@ -142,6 +142,32 @@ fi
 
 # --- 4) 写回 -----------------------------------------------
 echo "- 当前 vbat_uv: $(cat $VBAT 2>/dev/null) mV"
+
+# 越狱(late-load)模式下模块刚加载时拿不到驱动设备指针，写回会失败。
+# 实测：插拔一次充电器会让驱动重新投票并调用 getter，模块随即捕获指针。
+PREAD=/sys/module/uv2800/parameters/adsp_read
+if [ -w "$PREAD" ]; then
+    echo 1 > "$PREAD" 2>/dev/null
+    READY=$(cat "$PREAD" 2>/dev/null)
+    if [ -z "$READY" ] || [ "$READY" -le 2000 ] 2>/dev/null; then
+        echo ""
+        echo "- ⚠️ 模块尚未就绪（越狱模式下驱动只在开机调用 getter）"
+        echo "-    请【插拔一次充电器】，最多等待 60 秒 ..."
+        i=0
+        while [ "$i" -lt 30 ]; do
+            sleep 2
+            echo 1 > "$PREAD" 2>/dev/null
+            READY=$(cat "$PREAD" 2>/dev/null)
+            if [ -n "$READY" ] && [ "$READY" -gt 2000 ] 2>/dev/null; then
+                echo "-    ✅ 已就绪（电量计当前值 $READY mV）"
+                break
+            fi
+            i=$((i+1))
+        done
+        [ "$i" -ge 30 ] && echo "-    ❌ 等待超时，写回可能失败；可重启手机后重试"
+    fi
+fi
+
 echo "- 写回中 ..."
 echo "$TARGET" > "$PARAM"
 echo "- 写入返回   : $?"

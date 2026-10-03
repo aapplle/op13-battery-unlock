@@ -34,6 +34,34 @@ fi
 
 mkdir -p "$BK"
 
+# --- * 越狱(late-load)模式的补写机制 --------------------------------------
+# 越狱模式下模块在开机【之后】才加载，驱动已经错过了开机那次
+# oplus_fg_get_deep_term_volt 调用，模块拿不到驱动设备指针 -> 写不进 ADSP。
+# 实测（一加13 / COS17）：插拔一次充电器会让驱动重新投票终止电压并调用 getter，
+# 模块随即捕获指针，ADSP 读写立刻恢复正常。
+# 因此这里后台重试，等用户插拔充电器后自动补写，无需重启。
+adsp_retry() {
+    _i=0
+    while [ "$_i" -lt 240 ]; do          # 最多等 240 x 15s = 1 小时
+        sleep 15
+        echo 1 > "$P/adsp_read" 2>/dev/null
+        _c=$(cat "$P/adsp_read" 2>/dev/null)
+        if [ -n "$_c" ] && [ "$_c" -gt 2000 ] 2>/dev/null; then
+            if [ "$_c" != "$ADSP_TARGET" ]; then
+                [ -f "$BK/adsp_orig.txt" ] || echo "$_c" > "$BK/adsp_orig.txt"
+                echo "$ADSP_TARGET" > "$P/adsp_write" 2>/dev/null
+                echo "uv2800: [补写] 模块已就绪，电量计终止电压 $_c -> ${ADSP_TARGET} mV（满电状态切换后重算 fcc）"
+            else
+                echo "uv2800: [补写] 电量计终止电压已是 ${ADSP_TARGET} mV，无需写入"
+            fi
+            return 0
+        fi
+        _i=$((_i+1))
+    done
+    echo "uv2800: [补写] 等待超时（1 小时），请在管理器点「执行」按钮或重启手机"
+    return 1
+}
+
 # --- * 解耦：ADSP 终止电压目标（控制电量计模型下限）---------------------
 # 默认 2600（解耦推荐值：模型下限压到 2600，让 0% 段覆盖到 2800 附近）。
 # 首次安装时自动生成 $BK/adsp_target；用户可手改（如 2800 = 不解耦、3000 = 保守）。
@@ -83,7 +111,9 @@ elif [ -w "$P/adsp_read" ]; then
             echo "uv2800: 电量计终止电压已是 ${ADSP_TARGET} mV，无需写入"
         fi
     else
-        echo "uv2800: 读不到电量计终止电压（uv_dev 未就绪），跳过原生 SOC 校准"
+        echo "uv2800: ⚠️ 模块尚未就绪（越狱模式下驱动只在开机调用 getter）"
+        echo "uv2800:    请【插拔一次充电器】或重启手机；后台会自动补写电量计终止电压"
+        adsp_retry &
     fi
 fi
 
