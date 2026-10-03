@@ -278,7 +278,7 @@ rm /data/adb/uv2800_backup/skip     # 否则「禁止超级省电」不会重新
 | [PROJECT-vbat_uv-2800.md](PROJECT-vbat_uv-2800.md) | 本文档（当前技术栈 + 踩坑清单）|
 | [PROJECT-history.md](PROJECT-history.md) | v1~v9.2 演进史、判死路线、实测证据 |
 | [_work/ksu-module/uv2800/](_work/ksu-module/uv2800/) | **当前模块打包源（v10）** |
-| [_work/ksu-module/一加13解容-v10.zip](_work/ksu-module/一加13解容-v10.zip) | v10 发布包（md5 4db6c15b）|
+| [_work/ksu-module/一加13解容-v10.1.zip](_work/ksu-module/一加13解容-v10.1.zip) | v10 发布包（md5 e2cf8003）|
 | [_work/ksu-module/uv2800.zip](_work/ksu-module/uv2800.zip) | v9.2 发布包（保留）|
 | [_work/uv2800/uv2800_v10.c](_work/uv2800/uv2800_v10.c) | 当前内核源码 |
 | [_work/uv2800/uv2800_v10.ko](_work/uv2800/uv2800_v10.ko) | 当前 ko（28568 字节）|
