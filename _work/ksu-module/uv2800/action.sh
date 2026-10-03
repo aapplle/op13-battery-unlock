@@ -22,6 +22,7 @@ CNTFILE=/sys/devices/virtual/oplus_chg/common/deep_dischg_counts
 PARAM=/sys/module/uv2800/parameters/restore
 VBAT=/sys/class/oplus_chg/battery/vbat_uv
 VOLT_NOW=/sys/class/power_supply/battery/voltage_now
+BK=/data/adb/uv2800_backup
 
 echo "=========================================="
 echo "  uv2800  恢复原值（写回电量计 ADSP）"
@@ -79,8 +80,25 @@ fi
 CNT=$(cat "$CNTFILE" 2>/dev/null)
 echo "- 放电次数   : $CNT"
 
-# --- 3) 解析 DT 表并计算原值 -------------------------------
-TARGET=$(od -An -tx1 -v "$TABLE" 2>/dev/null | tr -s ' \n' '\n' | grep -v '^$' | awk -v cnt="$CNT" '
+# --- 3) 计算原值：① 首次写入前的备份  ② DT 表实时计算（兜底）---------
+# 【为什么优先用备份】service.sh 在【首次写入前】把电量计当时的真实值存进
+# adsp_orig.txt，那个值就是驱动自己算出来的原值（与本机驱动日志
+# "DEEP_COUNT_VOTER, volt = 3250" 完全一致）。它与 ColorOS 版本无关，
+# 比查 DT 表可靠得多（C16 的表档位从 800 起，count<800 时查表必然失败）。
+TARGET=""
+ORIG="$BK/adsp_orig.txt"
+if [ -f "$ORIG" ]; then
+    T=$(cat "$ORIG" 2>/dev/null | tr -d "[:space:]")
+    case "$T" in ''|*[!0-9]*) T="" ;; esac
+    if [ -n "$T" ] && [ "$T" -ge 2000 ] && [ "$T" -le 5000 ]; then
+        TARGET="$T"
+        echo "- 原值来源   : 首次写入前的备份 adsp_orig.txt"
+    fi
+fi
+
+if [ -z "$TARGET" ]; then
+    echo "- 原值来源   : DT 表实时计算（adsp_orig.txt 缺失或无效）"
+    TARGET=$(od -An -tx1 -v "$TABLE" 2>/dev/null | tr -s ' \n' '\n' | grep -v '^$' | awk -v cnt="$CNT" '
 function hex2dec(h,   i, c, d, v) {
     v = 0
     for (i = 1; i <= length(h); i++) {
@@ -98,14 +116,20 @@ END {
         v = hex2dec(b[i] b[i+1] b[i+2] b[i+3])
         c = hex2dec(b[i+4] b[i+5] b[i+6] b[i+7])
         if (v < 0 || c < 0) continue
+        if (i == 0) tgt = v
         if (c <= cnt) tgt = v
     }
     print tgt
 }')
+fi
 
-case "$TARGET" in ''|*[!0-9-]*) TARGET=-1 ;; esac
-if [ "$TARGET" -lt 2000 ]; then
+case "$TARGET" in ''|*[!0-9]*) TARGET=-1 ;; esac
+if [ "$TARGET" -lt 2000 ] || [ "$TARGET" -gt 5000 ]; then
     echo "✗ 计算失败（得到 '$TARGET'）"
+    echo "  请把以下信息反馈给作者："
+    echo "    deep_dischg_counts = $CNT"
+    echo "    使用的表 = $TABLE"
+    echo "    adsp_orig.txt = $([ -f "$ORIG" ] && cat "$ORIG" || echo '不存在')"
     exit 1
 fi
 echo "- 算出的原值 : ${TARGET} mV"
@@ -129,7 +153,6 @@ echo "- 内核日志："
 dmesg 2>/dev/null | grep "uv2800:" | grep -v "Modules linked" | tail -4
 
 # --- 5) 同时恢复「禁止超级省电」设备策略 ---------------------
-BK=/data/adb/uv2800_backup
 XML=/data/system/oplus_devicepolicy_data_customize.xml
 KEY=oplus_diable_super_power_saving_mode
 

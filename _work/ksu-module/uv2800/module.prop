@@ -1,6 +1,6 @@
 id=uv2800
 name=一加13解容
-version=10.0
-versionCode=13
+version=10.1
+versionCode=14
 author=枫落1911
 description=关机截止电压 2800mV；电量计【原生】按解容后的空电点计算 SOC；显示真实电量；禁止1%强制进入超级省电。⚠️ 卸载前请保证电量>30%，先点「执行」按钮恢复默认再卸载
