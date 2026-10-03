@@ -34,34 +34,6 @@ fi
 
 mkdir -p "$BK"
 
-# --- * 越狱(late-load)模式的补写机制 --------------------------------------
-# 越狱模式下模块在开机【之后】才加载，驱动已经错过了开机那次
-# oplus_fg_get_deep_term_volt 调用，模块拿不到驱动设备指针 -> 写不进 ADSP。
-# 实测（一加13 / COS17）：插拔一次充电器会让驱动重新投票终止电压并调用 getter，
-# 模块随即捕获指针，ADSP 读写立刻恢复正常。
-# 因此这里后台重试，等用户插拔充电器后自动补写，无需重启。
-adsp_retry() {
-    _i=0
-    while [ "$_i" -lt 240 ]; do          # 最多等 240 x 15s = 1 小时
-        sleep 15
-        echo 1 > "$P/adsp_read" 2>/dev/null
-        _c=$(cat "$P/adsp_read" 2>/dev/null)
-        if [ -n "$_c" ] && [ "$_c" -gt 2000 ] 2>/dev/null; then
-            if [ "$_c" != "$ADSP_TARGET" ]; then
-                [ -f "$BK/adsp_orig.txt" ] || echo "$_c" > "$BK/adsp_orig.txt"
-                echo "$ADSP_TARGET" > "$P/adsp_write" 2>/dev/null
-                echo "uv2800: [补写] 模块已就绪，电量计终止电压 $_c -> ${ADSP_TARGET} mV（满电状态切换后重算 fcc）"
-            else
-                echo "uv2800: [补写] 电量计终止电压已是 ${ADSP_TARGET} mV，无需写入"
-            fi
-            return 0
-        fi
-        _i=$((_i+1))
-    done
-    echo "uv2800: [补写] 等待超时（1 小时），请在管理器点「执行」按钮或重启手机"
-    return 1
-}
-
 # --- * 解耦：ADSP 终止电压目标（控制电量计模型下限）---------------------
 # 默认 2600（解耦推荐值：模型下限压到 2600，让 0% 段覆盖到 2800 附近）。
 # 首次安装时自动生成 $BK/adsp_target；用户可手改（如 2800 = 不解耦、3000 = 保守）。
@@ -80,40 +52,37 @@ case "$ADSP_TARGET" in
     *) ADSP_TARGET=$ADSP_TARGET_DEFAULT ;;
 esac
 
-# --- 2) ★ 原生 SOC 校准：电量计终止电压 -> ADSP_TARGET（默认 2800） ---------------------
-# 实测：写 2800 + 充满一次 -> fcc 4346→4878；写 2600 + 充满 -> fcc 4854→4988
-#       于是 rm/fcc 原生覆盖 3250~2800mV 那 450mV（不需要任何显示层 hack）。
-# ⚠️ 电量计【实时读取】该值，但 fcc 重算需要一次满电状态切换（充满/满电拔插充电器）。
-# ⚠️ ADSP_TARGET 与关机电压（内核 hook 固定 2800）完全解耦。
-# ⚠️ 只在值不同时才写（避免反复写硬件寄存器，保护其寿命）。
+# --- 2) ★ 原生 SOC 校准：解耦目标同步到内核 adsp_force ---------------------
+# v10.5 起：日常解耦【不再】用 adsp_write（依赖 uv_dev，越狱模式失效），
+# 改为把 ADSP_TARGET 同步到内核 adsp_force 参数（setter hook 强制值）。
+# 此后驱动每次 vote 终止电压（开机 vote / 充电状态变化 vote）都会被
+# setter hook 强制成 adsp_force —— 与 uv_dev 无关，两种模式统一。
+# 电量计【实时读取】ADSP term，但 fcc 重算仍需一次满电状态切换。
 if [ -f "$BK/no_adsp_write" ]; then
-    echo "uv2800: 检测到 no_adsp_write 标记，本次不写电量计终止电压（测试用）"
-elif [ -w "$P/adsp_read" ]; then
-    i=0; cur=""
-    while [ $i -lt 60 ]; do
-        echo 1 > "$P/adsp_read" 2>/dev/null
-        cur=$(cat "$P/adsp_read" 2>/dev/null)
-        [ -n "$cur" ] && [ "$cur" -gt 2000 ] 2>/dev/null && break
-        cur=""
-        sleep 1
-        i=$((i+1))
-    done
-
-    if [ -n "$cur" ]; then
-        if [ "$cur" != "$ADSP_TARGET" ]; then
-            if [ ! -f "$BK/adsp_orig.txt" ]; then
-                echo "$cur" > "$BK/adsp_orig.txt"
-                echo "uv2800: 已备份电量计原始终止电压 = ${cur} mV"
-            fi
-            echo "$ADSP_TARGET" > "$P/adsp_write"
-            echo "uv2800: 电量计终止电压 ${cur} -> ${ADSP_TARGET} mV（满电状态切换后重算 fcc）"
-        else
-            echo "uv2800: 电量计终止电压已是 ${ADSP_TARGET} mV，无需写入"
-        fi
+    echo "uv2800: 检测到 no_adsp_write 标记，本次不同步解耦目标（测试用）"
+elif [ -w "$P/adsp_force" ]; then
+    # 备份首次见到的原始 term（供卸载回写），需 uv_dev 就绪才能直读
+    echo 1 > "$P/adsp_read" 2>/dev/null
+    _orig=$(cat "$P/adsp_read" 2>/dev/null)
+    if [ -n "$_orig" ] && [ "$_orig" -gt 2000 ] 2>/dev/null && [ ! -f "$BK/adsp_orig.txt" ]; then
+        echo "$_orig" > "$BK/adsp_orig.txt"
+        echo "uv2800: 已备份电量计原始终止电压 = ${_orig} mV"
+    fi
+    _cur_force=$(cat "$P/adsp_force" 2>/dev/null)
+    if [ "$_cur_force" != "$ADSP_TARGET" ]; then
+        echo "$ADSP_TARGET" > "$P/adsp_force"
+        echo "uv2800: 解耦目标 adsp_force ${_cur_force} -> ${ADSP_TARGET} mV（vote 触发后写入电量计）"
     else
-        echo "uv2800: ⚠️ 模块尚未就绪（越狱模式下驱动只在开机调用 getter）"
-        echo "uv2800:    请【插拔一次充电器】或重启手机；后台会自动补写电量计终止电压"
-        adsp_retry &
+        echo "uv2800: 解耦目标已是 ${ADSP_TARGET} mV，无需同步"
+    fi
+    # 越狱模式提示：uv_dev 未就绪（无法直读）说明开机 vote 已错过，
+    # 需插拔一次充电器触发 vote，让 setter hook 把 adsp_force 写进电量计
+    if [ "$KSU_LATE_LOAD" = "1" ]; then
+        echo 1 > "$P/adsp_read" 2>/dev/null
+        _rdy=$(cat "$P/adsp_read" 2>/dev/null)
+        if [ -z "$_rdy" ] || [ "$_rdy" -le 2000 ] 2>/dev/null; then
+            echo "uv2800: ⚠️ 越狱模式：开机 vote 已错过，请【插拔一次充电器】完成解耦"
+        fi
     fi
 fi
 
