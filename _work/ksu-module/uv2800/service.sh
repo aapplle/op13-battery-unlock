@@ -19,9 +19,72 @@ CS=/sys/class/oplus_chg/battery/chip_soc
 CAP=/sys/class/power_supply/battery/capacity
 CAPUE=/sys/class/power_supply/battery/uevent
 
+
+# v10.7：日志函数（stdout + dmesg + 落盘到备份目录），见 log.sh
+[ -f "$MODDIR/log.sh" ] && . "$MODDIR/log.sh"
+command -v uv_log >/dev/null 2>&1 || uv_log() { echo "uv2800: $*"; }
+klog() { uv_log "$@"; }
+
+# v10.8：原值备份统一入口（P0 修复：备份污染）
+# 【背景】曾实测到 adsp_orig.txt 被备份成 2600（已解耦值）/2800（hook 污染值），
+# 导致 action.sh 卸载回写把 2800 当"原值"写回（真原值 3250）。
+# 【判据】原值必须大于关机电压 2800（留 100mV 余量）：读到 <=2900 说明 ADSP
+# 已被本模块（或 hook）改写过，此时【拒绝备份】，让 action.sh 走 DT 查表兜底。
+backup_orig() {
+    _v="$1"
+    if [ -f "$BK/adsp_orig.txt" ]; then
+        return 0
+    fi
+    case "$_v" in ''|*[!0-9]*) return 1 ;; esac
+    if [ "$_v" -le 2900 ] 2>/dev/null; then
+        klog "⚠️ 读到的电量计值 ${_v} mV <= 2900，疑似已被本模块修改，【拒绝备份】（action.sh 将走 DT 查表兜底）"
+        return 1
+    fi
+    echo "$_v" > "$BK/adsp_orig.txt"
+    klog "已备份电量计原始终止电压 = ${_v} mV"
+    return 0
+}
+
+uv_log_sep "service.sh 开始（KSU_LATE_LOAD=$KSU_LATE_LOAD）"
+
+# --- 0) 清理上次残留的后台补写进程（v10.7）------------------------------
+# 【为什么需要】adsp_retry 是后台进程，软重启只 stop/start 框架，【不会】杀掉它。
+# 若不清掉，软重启后会同时存在两个 retry 进程（实测确认），虽因幂等无害，
+# 但会重复轮询。这里用 PID 文件精确清理，并校验 PID 仍在运行。
+if [ -f "$BK/retry.pid" ]; then
+    _old=$(cat "$BK/retry.pid" 2>/dev/null)
+    case "$_old" in
+        ""|*[!0-9]*) ;;
+        *)
+            if [ -d "/proc/$_old" ]; then
+                kill "$_old" 2>/dev/null && klog "已清理上次残留的后台补写进程 (pid=$_old)"
+            fi
+            ;;
+    esac
+    rm -f "$BK/retry.pid"
+fi
+
+# 兜底：扫描并清理【所有】其他 service.sh 进程（PID 文件只能管到上一次，
+# 管不了更早的遗留进程 —— 实测发现旧版本残留的僵尸进程会一直存活到 1 小时超时）。
+# 只保留当前进程自己（$$）。
+_me=$$
+_n=0
+for _p in /proc/[0-9]*; do
+    _pid=${_p#/proc/}
+    [ "$_pid" = "$_me" ] && continue
+    case "$_pid" in ""|*[!0-9]*) continue ;; esac
+    _c=$(cat "$_p/cmdline" 2>/dev/null | tr "\0" " ")
+    case "$_c" in
+        *uv2800/service.sh*)
+            kill "$_pid" 2>/dev/null && _n=$((_n+1))
+            ;;
+    esac
+done
+[ "$_n" -gt 0 ] && klog "已清理 $_n 个遗留的 service.sh 进程（只保留当前 pid=$$）"
+
 # late-load（越狱）模式下系统已完全启动，不需要等待；标准启动才需要
 if [ "$KSU_LATE_LOAD" = "1" ]; then
-    echo "uv2800: late-load 模式，跳过 sleep 20"
+    klog "late-load 模式，跳过 sleep 20"
 else
     sleep 20
 fi
@@ -29,7 +92,7 @@ fi
 # --- 1) 兜底 insmod（post-fs-data 时 oplus_chg_v2 可能还没就绪）---
 if ! lsmod | grep -q "^uv2800"; then
     insmod "$MODDIR/uv2800.ko" 2>/dev/null
-    echo "uv2800: service.sh 兜底 insmod rc=$?"
+    klog "service.sh 兜底 insmod rc=$?"
 fi
 
 mkdir -p "$BK"
@@ -41,7 +104,7 @@ mkdir -p "$BK"
 # 关机电压由内核 getter hook 固定为 2800，两者完全独立。
 if [ ! -f "$BK/adsp_target" ]; then
     echo "$ADSP_TARGET_DEFAULT" > "$BK/adsp_target"
-    echo "uv2800: 已生成 $BK/adsp_target = $ADSP_TARGET_DEFAULT（解耦目标，可手改）"
+    klog "已生成 $BK/adsp_target = $ADSP_TARGET_DEFAULT（解耦目标，可手改）"
 fi
 ADSP_TARGET=$(cat "$BK/adsp_target" 2>/dev/null | tr -d "[:space:]")
 case "$ADSP_TARGET" in
@@ -69,31 +132,49 @@ esac
 adsp_retry() {
     _i=0
     while [ "$_i" -lt 240 ]; do          # 最多等 240 x 15s = 1 小时
+        # v10.7：用户点「执行」后会出现 skip 标记，立刻停手，不要覆盖用户的恢复
+        if [ -f "$BK/skip" ]; then
+            klog "[补写] 检测到 skip 标记（用户已手动恢复），停止补写"
+            return 0
+        fi
         sleep 15
         echo 1 > "$P/adsp_read" 2>/dev/null
         _c=$(cat "$P/adsp_read" 2>/dev/null)
         if [ -n "$_c" ] && [ "$_c" -gt 2000 ] 2>/dev/null; then
             if [ "$_c" != "$ADSP_TARGET" ]; then
-                [ -f "$BK/adsp_orig.txt" ] || echo "$_c" > "$BK/adsp_orig.txt"
+                backup_orig "$_c"
                 echo "$ADSP_TARGET" > "$P/adsp_write" 2>/dev/null
-                echo "uv2800: [补写] 模块已就绪，电量计终止电压 $_c -> ${ADSP_TARGET} mV（满电状态切换后重算 fcc）"
+                klog "[补写] 模块已就绪，电量计终止电压 $_c -> ${ADSP_TARGET} mV（满电状态切换后重算 fcc）"
             else
-                echo "uv2800: [补写] 电量计终止电压已是 ${ADSP_TARGET} mV，无需写入"
+                klog "[补写] 电量计终止电压已是 ${ADSP_TARGET} mV，无需写入"
             fi
+            rm -f "$BK/retry.pid" 2>/dev/null
             return 0
         fi
         _i=$((_i+1))
     done
-    echo "uv2800: [补写] 等待超时（1 小时），请插拔一次充电器或在管理器点「执行」"
+    klog "[补写] 等待超时（1 小时），本次开机不再自动补写"
+    klog "[补写] 如需解耦：软重启/重启手机让本脚本重跑（或手动 echo 2600 > $P/adsp_write）"
+    rm -f "$BK/retry.pid" 2>/dev/null
     return 1
 }
 
 if [ -f "$BK/no_adsp_write" ]; then
-    echo "uv2800: 检测到 no_adsp_write 标记，本次不写电量计终止电压（测试用）"
+    klog "检测到 no_adsp_write 标记，本次不写电量计终止电压（测试用）"
+elif [ -f "$BK/skip" ]; then
+    # v10.7：skip 由 action.sh 回写原值后创建。若存在说明用户已手动恢复，
+    # 本次开机/软重启【不再】重新施加解耦，否则会把用户的恢复覆盖回 2600。
+    klog "检测到 skip 标记（已手动恢复原值），本次不施加解耦"
+    klog "若要重新自动解耦，请执行：rm $BK/skip 后重启"
 elif [ -w "$P/adsp_read" ]; then
     # 探测 uv_dev 是否就绪（能直读真实值）。标准模式给 60s 余量等开机 vote。
     i=0; cur=""
     while [ $i -lt 60 ]; do
+        # v10.7：用户点「执行」后会出现 skip 标记，立刻停手，不要覆盖用户的恢复
+        if [ -f "$BK/skip" ]; then
+            klog "检测到 skip 标记（用户已手动恢复），停止解耦探测"
+            break
+        fi
         echo 1 > "$P/adsp_read" 2>/dev/null
         cur=$(cat "$P/adsp_read" 2>/dev/null)
         [ -n "$cur" ] && [ "$cur" -gt 2000 ] 2>/dev/null && break
@@ -102,27 +183,28 @@ elif [ -w "$P/adsp_read" ]; then
         i=$((i+1))
     done
 
+    # v10.7：skip 出现后不再写入（防止覆盖用户刚恢复的原值）
+    [ -f "$BK/skip" ] && cur=""
+
     if [ -n "$cur" ]; then
         # ① uv_dev 就绪：主动写入
         if [ "$cur" != "$ADSP_TARGET" ]; then
-            if [ ! -f "$BK/adsp_orig.txt" ]; then
-                echo "$cur" > "$BK/adsp_orig.txt"
-                echo "uv2800: 已备份电量计原始终止电压 = ${cur} mV"
-            fi
+            backup_orig "$cur"
             echo "$ADSP_TARGET" > "$P/adsp_write"
-            echo "uv2800: 电量计终止电压 ${cur} -> ${ADSP_TARGET} mV（满电状态切换后重算 fcc）"
+            klog "电量计终止电压 ${cur} -> ${ADSP_TARGET} mV（满电状态切换后重算 fcc）"
         else
-            echo "uv2800: 电量计终止电压已是 ${ADSP_TARGET} mV，无需写入"
+            klog "电量计终止电压已是 ${ADSP_TARGET} mV，无需写入"
         fi
     else
         # ② uv_dev 未就绪：越狱模式提示插拔 + 后台补写
         if [ "$KSU_LATE_LOAD" = "1" ]; then
-            echo "uv2800: ⚠️ 越狱模式：开机 vote 已错过（uv_dev 未捕获）"
+            klog "⚠️ 越狱模式：开机 vote 已错过（uv_dev 未捕获）"
             echo "uv2800:    请【插拔一次充电器】（无时间限制），后台将自动补写解耦"
         else
-            echo "uv2800: 读不到电量计终止电压（uv_dev 未就绪），后台补写等待中"
+            klog "读不到电量计终止电压（uv_dev 未就绪），后台补写等待中"
         fi
         adsp_retry &
+        echo $! > "$BK/retry.pid" 2>/dev/null   # v10.7：记录 PID 供下次清理
     fi
 fi
 # --- 3) ★ 显示真实电量：bind-mount chip_soc -> capacity ---------------
@@ -152,7 +234,11 @@ unbind_all() {
 }
 
 if [ -f "$BK/no_real_soc" ]; then
-    echo "uv2800: 检测到 no_real_soc 标记，保留官方平滑电量"
+    klog "检测到 no_real_soc 标记，保留官方平滑电量"
+elif [ -f "$BK/skip" ]; then
+    # v10.7：用户已点「执行」恢复原值，action.sh 也已 umount 过绑定，
+    # 本次开机/软重启【不再】重新绑定真实电量，保持官方平滑显示。
+    klog "检测到 skip 标记（已手动恢复），本次不绑定真实电量"
 elif [ -e "$CS" ] && [ -e "$CAP" ]; then
     unbind_all
     bound=0
@@ -171,7 +257,7 @@ elif [ -e "$CS" ] && [ -e "$CAP" ]; then
         # 需要一次 uevent 让 Android 框架重新读取，否则要等下次电量变化
         echo change > "$CAPUE" 2>/dev/null
     else
-        echo "uv2800: bind mount 失败，保留官方平滑电量"
+        klog "bind mount 失败，保留官方平滑电量"
     fi
 fi
 
@@ -180,8 +266,8 @@ fi
 #       true 时低电量强制对话框不再弹出、设置入口隐藏。
 # 服务端 checkPermission() 要求 appId==1000 -> 必须 su 1000。
 if [ -f "$BK/skip" ]; then
-    echo "uv2800: 检测到 skip 标记（已手动恢复），本次不应用设备策略"
-    echo "uv2800: 若要重新自动应用，请 rm $BK/skip"
+    klog "检测到 skip 标记（已手动恢复），本次不应用设备策略"
+    klog "若要重新自动应用，请 rm $BK/skip"
 else
     if [ ! -f "$BK/applied" ]; then
         if [ -f "$XML" ]; then

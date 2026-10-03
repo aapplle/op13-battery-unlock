@@ -1,9 +1,9 @@
-# 一加 13 vbat_uv 2800mV 项目文档（当前技术栈 v10.6）
+# 一加 13 vbat_uv 2800mV 项目文档（当前技术栈 v10.8）
 
 > 目标：把一加 13 的关机截止电压 3250mV → **2800mV**，并让电量计**原生**按新空电点计算 SOC。
 > 形态：1 个内核模块（5 个 kprobe，30KB）+ 1 个 KernelSU 模块。**不改任何分区、不刷 dtbo。**
 > 版本演进、判死路线、实测证据 → [PROJECT-history.md](PROJECT-history.md)
-> 最后更新：2026-10-03（v10.6：越狱模式解耦修复 + 脚本精简）
+> 最后更新：2026-10-03（v10.8：原值备份防污染 + 提示修复；v10.7：软重启兼容性修复）
 
 ---
 
@@ -108,13 +108,14 @@ fcc                                   = 4346mAh →  ~5032mAh （电量计原生
 
 ```
 /data/adb/modules/uv2800/
-├── module.prop        version=10.6
+├── module.prop        version=10.8
 ├── customize.sh       安装时执行（用户可见）：仅越狱模式提示「插拔一次充电器」
-├── post-fs-data.sh    标准启动：等 oplus_chg_v2（≤30s）→ insmod
+├── log.sh             公共日志函数（v10.7 新增）：stdout + dmesg + 落盘 $BK/uv2800.log
+├── post-fs-data.sh    标准启动：等 oplus_chg_v2（≤30s）→ insmod；已加载则跳过（v10.7，保 uv_dev）
 ├── late-load.sh       越狱模式：已加载则跳过（防重复 insmod 重置 uv_dev）
 ├── service.sh         adsp_write 解耦写入 + 越狱 adsp_retry 补写 + bind-mount + 设备策略【完全幂等】
 ├── action.sh          「执行」按钮：读实时 DT 算原值回写（越狱模式先检测插拔）
-├── uninstall.sh       恢复设备策略文件（ADSP 无法在此回写，有诚实提示）
+├── uninstall.sh       恢复设备策略文件 + nsenter 解绑显示（v10.7）；ADSP 无法在此回写，有诚实提示
 └── uv2800.ko          v10 内核（28568 字节，5 个 kprobe）
 ```
 
@@ -122,11 +123,13 @@ fcc                                   = 4346mAh →  ~5032mAh （电量计原生
 
 | 文件 | 用途 |
 |---|---|
-| adsp_orig.txt | 首次写入前备份的电量计原始 term（如 3250）—— **action.sh 回写的第一取值来源** |
+| adsp_orig.txt | 首次写入前备份的电量计原始 term（如 3250）—— **action.sh 回写的第一取值来源**（v10.8 起 ≤2900 的值拒绝备份/不信任，见 §2.4）|
 | adsp_target | 解耦目标值（默认 2600），service.sh 经 adsp_write 写入；可手改（2800=不解耦/3000=保守）|
 | applied / orig_state / devicepolicy_orig.xml | 设备策略备份（只备一次）|
-| skip | 点过「执行」按钮后打上 → 不再自动应用策略（重装前需 rm）|
+| skip | 点过「执行」按钮后打上 → 不再自动解耦/绑定/应用策略（重装前需 rm）|
 | no_adsp_write / no_real_soc | 测试开关：分别禁用解耦同步 / bind-mount |
+| retry.pid | 后台补写进程 PID（v10.7，软重启后精确清理残留）|
+| uv2800.log | 落盘日志（v10.7，卸载保留，便于反馈问题）|
 
 ### 2.4 action.sh 的原值计算（两级取值）
 
@@ -143,6 +146,11 @@ fcc                                   = 4346mAh →  ~5032mAh （电量计原生
 **为什么 ① 优先**（C16 实测教训）：C16 表档位从 800 起，count<800 时纯查表失败；
 且同版本 DT 存在多个表变体（dtbo 不同 overlay entry），查表结果不唯一。
 **只有「首次写入前的备份值」是唯一权威原值。**
+
+**① 的防污染校验（v10.8 新增，实机 P0 教训）**：备份只在「读到的值 > 2900mV」时写入
+（真原值最低档 3000mV，见实机 DT term_coeff 表；2600/2800 必为本模块写过的值）；
+action.sh 读到 ≤2900 的存量备份时判定为历史污染，隔离为 adsp_orig.bad 并改走 ② 查表。
+v10.7 实测曾把 2800（hook 污染值）当原值回写，根因即备份无校验。
 
 解析用 od + awk（纯 POSIX，Android toybox 可跑）；
 **UV2800_DRYRUN=1 sh action.sh** 试运行（只算不写，会打印取值来源）。
@@ -186,6 +194,12 @@ KernelSU 越狱模式下 `post-fs-data.sh` 不执行，模块由 `late-load.sh` 
 
 **★ 无时间限制**：vote 是事件触发不是定时器，任意时刻插拔均有效；不插拔不影响关机保护
 （getter hook 固定 2800 已生效），只是解耦与回写暂不就绪。
+
+**★ 回写后还需一次插拔刷新 vbat_uv 缓存（v10.7 认知）**：vbat_uv 是驱动内部缓存，
+只在 vote 时重算。若「执行」前的插拔用于捕获 uv_dev，那一刻 uv_bypass=0，缓存被
+getter hook 写成 2800；回写后 hook 已放行（uv_bypass=1），**需再插拔一次**驱动才会
+把缓存刷新为原值。且越狱模式下 Manager 的「重启」是 ksud soft-reboot（内核不重启、
+驱动不重新初始化），**缓存不会因重启刷新**——action.sh 会区分这两种情况给出提示。
 
 **用户触点提示**：
 
@@ -329,7 +343,7 @@ echo 2800 > /data/adb/uv2800_backup/adsp_target   # 2800=不解耦 / 3000=保守
 |---|---|
 | [PROJECT-vbat_uv-2800.md](PROJECT-vbat_uv-2800.md) | 本文档（当前技术栈 v10.6）|
 | [PROJECT-history.md](PROJECT-history.md) | v1~v10.3 演进史、判死路线、实测证据 |
-| [_work/ksu-module/uv2800/](_work/ksu-module/uv2800/) | **当前模块打包源（v10.6）** |
+| [_work/ksu-module/uv2800/](_work/ksu-module/uv2800/) | **当前模块打包源（v10.8）** |
 | [_work/ksu-module/一加13解容-v10.6.zip](_work/ksu-module/一加13解容-v10.6.zip) | **当前发布包** |
 | [_work/uv2800/uv2800_v10.c](_work/uv2800/uv2800_v10.c) | **当前内核源码（v10，5 个 kprobe）** |
 | [_work/uv2800/uv2800_v10.ko](_work/uv2800/uv2800_v10.ko) | 当前 ko（30728 字节）|

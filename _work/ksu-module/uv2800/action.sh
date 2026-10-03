@@ -17,6 +17,12 @@
 #   UV2800_DRYRUN=1 sh action.sh   # 只算不写，用于验证计算路径
 # ============================================================
 
+MODDIR=${0%/*}
+# v10.7：日志函数（stdout + dmesg + 落盘到备份目录），见 log.sh
+[ -f "$MODDIR/log.sh" ] && . "$MODDIR/log.sh"
+command -v uv_log >/dev/null 2>&1 || uv_log() { echo "uv2800: $*"; }
+uv_log_sep "action.sh 恢复原值 开始"
+
 DTBASE=/sys/firmware/devicetree/base/soc/oplus,mms_gauge
 CNTFILE=/sys/devices/virtual/oplus_chg/common/deep_dischg_counts
 PARAM=/sys/module/uv2800/parameters/restore
@@ -90,6 +96,14 @@ ORIG="$BK/adsp_orig.txt"
 if [ -f "$ORIG" ]; then
     T=$(cat "$ORIG" 2>/dev/null | tr -d "[:space:]")
     case "$T" in ''|*[!0-9]*) T="" ;; esac
+    if [ -n "$T" ] && [ "$T" -le 2900 ] 2>/dev/null; then
+        # v10.8：备份值 <=2900 必为本模块写过的值（真原值最低档 3000，见 DT term_coeff），属历史污染，不可信。
+        # 隔离该文件并改用 DT 查表兜底（v10.7 实机教训：曾按污染的 2800 回写）。
+        echo "- ⚠️ adsp_orig.txt=$T mV 疑似历史污染值（原值应 >2900），已隔离，改用 DT 查表"
+        uv_log "adsp_orig.txt=$T 疑似污染，已隔离为 adsp_orig.bad"
+        mv -f "$ORIG" "$BK/adsp_orig.bad" 2>/dev/null
+        T=""
+    fi
     if [ -n "$T" ] && [ "$T" -ge 2000 ] && [ "$T" -le 5000 ]; then
         TARGET="$T"
         echo "- 原值来源   : 首次写入前的备份 adsp_orig.txt"
@@ -154,6 +168,7 @@ if [ "$KSU_LATE_LOAD" = "1" ]; then
         echo ""
         echo "- ⚠️ 越狱模式：模块尚未捕获驱动指针（开机 vote 已错过）"
         echo "-    请【插拔一次充电器】，最多等待 60 秒 ..."
+        NEEDED_PLUG=1        # v10.7：记录本次已提示插拔
         i=0; ok=0
         while [ "$i" -lt 30 ]; do
             sleep 2
@@ -172,6 +187,13 @@ if [ "$KSU_LATE_LOAD" = "1" ]; then
         fi
     fi
 fi
+# --- 3.5) ★ 先打 skip 标记（v10.7 关键修复）--------------------------
+# 【为什么必须在回写之前】service.sh 的 60 秒探测循环、以及后台 adsp_retry，
+# 会不断把 ADSP 写回解耦目标（2600）。若 skip 在回写【之后】才创建，
+# 这两个循环会在等待期间把刚恢复的原值又覆盖掉（实测：回写后 1 秒被撤销）。
+mkdir -p "$BK" && touch "$BK/skip"
+echo "- 已打上 skip 标记（service.sh 的解耦循环会立即停手）"
+echo ""
 echo "- 写回中 ..."
 echo "$TARGET" > "$PARAM"
 echo "- 写入返回   : $?"
@@ -181,6 +203,46 @@ sleep 2
 echo ""
 echo "- 内核日志："
 dmesg 2>/dev/null | grep "uv2800:" | grep -v "Modules linked" | tail -4
+
+# --- 4.5) ★ 刷新驱动侧的 vbat_uv 缓存（v10.7 新增）------------------
+# 【为什么需要】vbat_uv 不是 ADSP 的直读值，而是驱动内部的【缓存】：
+#   · 开机初始化时由驱动按 ADSP 算出来
+#   · 之后只在【vote】（插拔充电器 / 充电状态变化）时重新计算
+# 而模块的 getter hook 在 uv_bypass=0 时会把驱动刷新的值强制写成 2800；
+# 点「执行」后 uv_bypass=1（hook 已放行），此时插拔即可正常刷新为原值。
+# 所以回写 ADSP 后，vbat_uv 仍显示旧的 2800 —— 必须触发一次 vote 才会更新。
+# 【越狱模式特别注意】Manager 的重启在越狱模式下是【软重启】（ksud soft-reboot），
+# 内核不重启 → 驱动不重新初始化 → 缓存【不会】刷新。只有插拔充电器才行。
+CURV=$(cat "$VBAT" 2>/dev/null | tr -d "[:space:]")
+if [ "$CURV" != "$TARGET" ]; then
+    if [ "$NEEDED_PLUG" = "1" ]; then
+        # 刚才那次插拔是为捕获指针（发生在回写【之前】，此时 uv_bypass 还是 0），
+        # 驱动缓存被 getter hook 写成了 2800。回写后 uv_bypass=1（hook 已放行），
+        # 必须【再插拔一次】才会刷新成原值 —— 这不是重复提示，是必要的第二次。
+        echo ""
+        echo "- 刚才那次插拔发生在回写【之前】，驱动缓存被 hook 写成了 2800"
+        echo "-    请【再插拔一次充电器】（这次 hook 已放行，才会刷新为 $TARGET mV）"
+    else
+        echo ""
+        echo "- 驱动 vbat_uv 缓存仍是 $CURV mV，需要一次 vote 才会更新为 $TARGET mV"
+        echo "-    请【插拔一次充电器】，最多等待 60 秒 ..."
+    fi
+    j=0; okv=0
+    while [ "$j" -lt 30 ]; do
+        sleep 2
+        CURV=$(cat "$VBAT" 2>/dev/null | tr -d "[:space:]")
+        if [ "$CURV" = "$TARGET" ]; then
+            echo "-    ✅ vbat_uv 已刷新为 $CURV mV"; okv=1; break
+        fi
+        j=$((j+1))
+    done
+    if [ "$okv" != "1" ]; then
+        echo "-    ⚠️ 未检测到插拔（vbat_uv 仍为 $CURV mV）"
+        echo "-       不影响 ADSP 回写结果；之后任意时刻插拔一次充电器即可刷新。"
+    fi
+else
+    okv=skip        # v10.8：回写后缓存已是目标值，无需插拔刷新（结尾提示据此区分）
+fi
 
 # --- 5) 同时恢复「禁止超级省电」设备策略 ---------------------
 XML=/data/system/oplus_devicepolicy_data_customize.xml
@@ -205,10 +267,23 @@ echo "- 已恢复（超级省电功能将恢复可用）"
 
 # --- 6) 恢复官方平滑电量显示 ---
 CAP=/sys/class/power_supply/battery/capacity
-# /proc/mounts 里记录的是解析后的真实路径，所以直接尝试 umount
-if umount "$CAP" 2>/dev/null; then
+# ⚠️ 越狱模式下 service.sh 用 `nsenter -t 1 -m` 在 PID 1 全局命名空间绑定，
+#    这里也必须 nsenter 进去才解绑得到；再兜底本命名空间（标准启动模式）。
+#    注意：/proc/mounts 只显示最顶层，不能靠它判断是否绑定。
+_un=0
+if command -v nsenter >/dev/null 2>&1; then
+    while [ "$_un" -lt 8 ]; do
+        nsenter -t 1 -m -- umount "$CAP" 2>/dev/null || break
+        _un=$((_un+1))
+    done
+fi
+while [ "$_un" -lt 8 ]; do
+    umount "$CAP" 2>/dev/null || break
+    _un=$((_un+1))
+done
+if [ "$_un" -gt 0 ]; then
     echo change > /sys/class/power_supply/battery/uevent 2>/dev/null
-    echo "- 已恢复官方平滑电量显示"
+    echo "- 已恢复官方平滑电量显示（解绑 $_un 层）"
 else
     echo "- 电量显示本来就是官方平滑值，无需恢复"
 fi
@@ -224,11 +299,23 @@ echo "   · 官方平滑电量显示恢复"
 echo ""
 echo "  接下来请："
 echo "   1. 关闭（或卸载）本模块"
-echo "   2. 重启手机"
-echo "   3. 验证：cat $VBAT"
-echo "      应显示 ${TARGET}"
+# v10.8：区分三种情况，避免矛盾提示
+#   okv=1      ：等待期间已检测到刷新
+#   okv=skip   ：回写后 vbat_uv 已等于目标值，无需刷新（本次未进入等待）
+#   其他       ：需要用户插拔一次充电器
+if [ "$okv" = "1" ]; then
+    echo "   2. vbat_uv 已刷新为 ${TARGET} mV，直接卸载/重启即可"
+elif [ "$okv" = "skip" ]; then
+    echo "   2. vbat_uv 已是 ${TARGET} mV，无需刷新，直接卸载/重启即可"
+else
+    echo "   2. 【插拔一次充电器】刷新驱动 vbat_uv 缓存"
+    echo "      （越狱模式下 Manager 的「重启」是软重启，内核不重启，缓存不会刷新）"
+fi
+echo "   3. 验证：cat $VBAT   应显示 ${TARGET}"
+echo "      或看驱动内部 fcc：dmesg | grep bs_update_data | tail -1"
 echo ""
+uv_log "恢复完成：原值 ${TARGET} mV，vbat_uv 刷新=${okv:-0}（1=已刷新 skip=本已相等）"
 echo "  若以后重新启用本模块，请先执行："
 echo "   rm /data/adb/uv2800_backup/skip"
-echo "  （否则「禁止超级省电」策略不会重新应用）"
+echo "  （否则「禁止超级省电」策略与真实电量显示都不会重新应用）"
 echo "=========================================="
