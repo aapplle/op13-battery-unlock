@@ -14,7 +14,7 @@ P=/sys/module/uv2800/parameters
 BK=/data/adb/uv2800_backup                     # 备份目录放在模块【外】，卸载后仍存在
 XML=/data/system/oplus_devicepolicy_data_customize.xml
 KEY=oplus_diable_super_power_saving_mode
-ADSP_TARGET_DEFAULT=2800
+ADSP_TARGET_DEFAULT=2600
 CS=/sys/class/oplus_chg/battery/chip_soc
 CAP=/sys/class/power_supply/battery/capacity
 CAPUE=/sys/class/power_supply/battery/uevent
@@ -35,9 +35,14 @@ fi
 mkdir -p "$BK"
 
 # --- * 解耦：ADSP 终止电压目标（控制电量计模型下限）---------------------
-# 默认 2800。可在 $BK/adsp_target 里写别的值（如 2600）把模型下限压得更低。
+# 默认 2600（解耦推荐值：模型下限压到 2600，让 0% 段覆盖到 2800 附近）。
+# 首次安装时自动生成 $BK/adsp_target；用户可手改（如 2800 = 不解耦、3000 = 保守）。
 # 这个值【只影响电量计模型】，不影响关机电压 ——
 # 关机电压由内核 getter hook 固定为 2800，两者完全独立。
+if [ ! -f "$BK/adsp_target" ]; then
+    echo "$ADSP_TARGET_DEFAULT" > "$BK/adsp_target"
+    echo "uv2800: 已生成 $BK/adsp_target = $ADSP_TARGET_DEFAULT（解耦目标，可手改）"
+fi
 ADSP_TARGET=$(cat "$BK/adsp_target" 2>/dev/null | tr -d "[:space:]")
 case "$ADSP_TARGET" in
     ''|*[!0-9]*) ADSP_TARGET=$ADSP_TARGET_DEFAULT ;;
@@ -153,16 +158,21 @@ else
 
     i=0; ok=0
     while [ $i -lt 60 ]; do
-        if su 1000 -c "service call oplusdevicepolicy 4 s16 $KEY i32 1" >/dev/null 2>&1; then
-            ok=1; break
-        fi
+        OUT=$(su 1000 -c "service call oplusdevicepolicy 4 s16 $KEY i32 1" 2>&1)
+        case "$OUT" in
+            *Parcel*) ok=1; break ;;
+            *"Transaction too large"*)
+                echo "uv2800: ⚠️ oplusdevicepolicy 出现 Transaction too large（/data/system 下策略 XML 堆积）"
+                echo "uv2800:    请将本日志反馈作者；本次跳过设备策略，不影响其他功能"
+                ok=-1; break ;;
+        esac
         sleep 1
         i=$((i+1))
     done
     if [ "$ok" = "1" ]; then
         su 1000 -c "service call oplusdevicepolicy 1 s16 $KEY s16 true i32 1" >/dev/null 2>&1
         echo "uv2800: 设备策略 $KEY=true（waited ${i}s）"
-    else
+    elif [ "$ok" = "0" ]; then
         echo "uv2800: ⚠️ 等待 oplusdevicepolicy 服务超时（60s），设备策略未应用（下次开机重试）"
     fi
 fi
