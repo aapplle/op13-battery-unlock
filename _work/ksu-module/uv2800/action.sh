@@ -143,31 +143,35 @@ fi
 # --- 4) 写回 -----------------------------------------------
 echo "- 当前 vbat_uv: $(cat $VBAT 2>/dev/null) mV"
 
-# 越狱(late-load)模式下模块刚加载时拿不到驱动设备指针，写回会失败。
-# 实测：插拔一次充电器会让驱动重新投票并调用 getter，模块随即捕获指针。
-PREAD=/sys/module/uv2800/parameters/adsp_read
-if [ -w "$PREAD" ]; then
+# 【仅越狱模式】模块加载太晚错过开机那次 getter 调用，uv_dev 为空会写不进。
+# 标准模式开机 vote 时已捕获 uv_dev，无需此检测。插拔充电器会触发驱动重新
+# vote 并调用 getter，模块随即捕获指针。超时【中止】而非假成功（v10.5 修复）。
+if [ "$KSU_LATE_LOAD" = "1" ]; then
+    PREAD=/sys/module/uv2800/parameters/adsp_read
     echo 1 > "$PREAD" 2>/dev/null
     READY=$(cat "$PREAD" 2>/dev/null)
     if [ -z "$READY" ] || [ "$READY" -le 2000 ] 2>/dev/null; then
         echo ""
-        echo "- ⚠️ 模块尚未就绪（越狱模式下驱动只在开机调用 getter）"
+        echo "- ⚠️ 越狱模式：模块尚未捕获驱动指针（开机 vote 已错过）"
         echo "-    请【插拔一次充电器】，最多等待 60 秒 ..."
-        i=0
+        i=0; ok=0
         while [ "$i" -lt 30 ]; do
             sleep 2
             echo 1 > "$PREAD" 2>/dev/null
             READY=$(cat "$PREAD" 2>/dev/null)
             if [ -n "$READY" ] && [ "$READY" -gt 2000 ] 2>/dev/null; then
-                echo "-    ✅ 已就绪（电量计当前值 $READY mV）"
-                break
+                echo "-    ✅ 已就绪（电量计当前值 $READY mV）"; ok=1; break
             fi
             i=$((i+1))
         done
-        [ "$i" -ge 30 ] && echo "-    ❌ 等待超时，写回可能失败；可重启手机后重试"
+        if [ "$ok" != "1" ]; then
+            echo ""
+            echo "  ✗✗ 仍未就绪，已【中止】回写（电量计未被改动）✗✗"
+            echo "  请先插拔一次充电器，再重新点「执行」。"
+            exit 1
+        fi
     fi
 fi
-
 echo "- 写回中 ..."
 echo "$TARGET" > "$PARAM"
 echo "- 写入返回   : $?"

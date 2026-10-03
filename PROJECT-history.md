@@ -1,9 +1,10 @@
 # 一加 13 vbat_uv 2800mV 项目 —— 历史探索档案
 
 > 本文档是 [PROJECT-vbat_uv-2800.md](PROJECT-vbat_uv-2800.md) 的姊妹篇：
-> 主文档只保留**当前技术栈（v10）与踩坑清单**；本文档记录 **v1~v9.2 的版本演进、
-> 判死的技术路线、以及每一步的实测证据**。
+> 主文档只保留**当前技术栈（v10.5）与踩坑速查**；本文档记录 **v1~v10.5 的完整版本演进、
+> 判死的技术路线、关键逆向发现、以及每一步的实测证据**（含 v10.4/v10.5 越狱解耦修复全程）。
 > 读本文档的目的：理解「为什么是现在这个样子」，避免重走弯路。
+> 原始 44 章完整版存档于 [_work/v10/PROJECT-vbat_uv-2800-full-v44.md](_work/v10/PROJECT-vbat_uv-2800-full-v44.md)。
 
 ---
 
@@ -179,7 +180,7 @@ fcc 4388→2492 重算。结论：
 **解耦设计**：ADSP term=2600 只压电量计模型下限；
 关机电压由内核 getter hook 固定 2800。两者独立。
 
-### H6.6 跨版本通用性
+### H6.5 跨版本通用性
 
 解耦 5 层中 ①②③④（挂钩点签名、setter ABI、硬件命令 0x800A、shell）
 三版本静态验证全过；**第 ⑤ 层（电量计固件行为）无法静态证明** ——
@@ -245,3 +246,196 @@ fcc 4388→2492 重算。结论：
 读取：su 1000 -c "service call oplusdevicepolicy 4 s16 <KEY> i32 1"
 （服务端 checkPermission 要求 appId==1000；COS15/16/17 jar 均已验证存在该键）
 ```
+---
+
+## H9. v10.3 越狱（late-load）模式适配
+
+### H9.1 问题
+
+越狱模式下 `post-fs-data.sh` 不执行，模块由 `late-load.sh` 在系统启动后加载。
+用户实测反馈（C16 免解越狱用户截图）：
+
+```
+uv2800: 直读失败 (dev=0000000000000000 get=ffffffdcd6734928)
+uv2800: 信息不全 (dev=0000000000000000 set=ffffffdcd67347ec)，无法回写
+- 写入返回   : 0        <- 假成功：sysfs 写入永远返回 0
+- 回写完成!
+```
+
+**根因**：模块只在 `oplus_fg_get_deep_term_volt` 入口（offset 0，取 x0）捕获 wrapper，
+而驱动**只在开机调用它一次**（本机 t≈6.5s，之后 25 小时不再调用）。
+越狱模式必然错过 → `uv_dev` 永远 NULL。
+
+### H9.1b 影响范围（⚠️ 不是"全部失效"）
+
+模块**内核 hook 不依赖 `uv_dev`**，所以越狱模式下主体功能正常（越狱用户实测反馈）：
+
+| 功能 | 依赖 `uv_dev` | 越狱模式 |
+|---|---|---|
+| 关机截止电压 → 2800mV（getter hook）| ❌ | ✅ 正常（反馈"修改生效"）|
+| term 强制 2800mV（setter hook）| ❌ | ✅ 正常（反馈"**fcc 相比解容前增长**"）|
+| 显示 bind-mount chip_soc | ❌ | ✅ 正常 |
+| 禁超级省电（设备策略）| ❌ | ✅ 正常 |
+| `adsp_read/adsp_write/restore` 参数 | ✅ | ❌ **失效** |
+
+**失效的两条后果**：① 卸载前的恢复回写写不进去；② 解耦目标 2600 写不进去，
+ADSP 停在 setter hook 强制的 2800（"未解耦"）。
+
+### H9.2 失败路线（全部实测，勿重试）
+
+| # | 方案 | 结果 |
+|---|---|---|
+| 1 | 从 `vbat_uv_show+0`（入口）捕获 device | ❌ 内核崩溃 |
+| 2 | 从 `vbat_uv_show+0x0c` 捕获 device | ❌ 30 秒后崩溃（拿到的是**另一个** device）|
+| 3 | 伪造 wrapper `{0, device}` 传给 getter | ❌ 内核崩溃 |
+| 4 | 挂钩 `oplus_fg_get_vct` / `oplus_fg_get_car_c` 入口 | ❌ 正常运行时驱动根本不调用它们 |
+| 5 | 读电量计 sysfs 节点触发 | ❌ 只走 comm 层缓存 |
+| 6 | 切 `input_suspend` 模拟充电状态变化 | ❌ 不触发 getter |
+| 7 | 挂钩 `oplus_comm_update_vbat_uv_thr+0x10` 取 x0 | ❌ 是 comm device，非 wrapper |
+| 8 | 挂钩 `oplus_gauge_term_voltage_vote_callback` 取 x1 或 `*(x1+8)` | ❌ 两者都不是 wrapper |
+
+**关键实测数据（诊断版内核模块打印，本机 COS17）**：
+
+```
+真 wrapper        = ffffff887ab0b000
+真 wrapper 的 +8  = ffffff88308ee010   <- getter 需要的 device
+vbat_uv_show 的 x0= ffffff8817cc0c00   <- 完全不同的 device（一加13 双电芯）
+vote x1           = ffffff880fc64080
+vote *(x1+8)      = ffffff881003f000
+comm_thr x0       = ffffff880fe3f800
+```
+
+### H9.3 成功解法：插拔一次充电器
+
+实测（本机 COS17，干净越狱模拟：禁用模块 → 重启 → 手动 insmod）：
+
+```
+[  88.48] charger suspend change ...          <- 手动插拔充电器
+[  90.55] charger suspend change ...
+[ 100.76] uv2800: 直读 ADSP deep_term_volt = 2600 mV (rc=2600)   <- 恢复
+写 3000 -> 读回 3000 OK ；写 2600 -> 读回 2600 OK
+```
+
+驱动在充电状态变化时会重新投票终止电压 → 再次调用 getter → 模块立即捕获 wrapper。
+
+**内核模块零改动**（`uv2800.ko` md5 `0273103a`，与 v10 一致），只改脚本：
+`service.sh` 后台 `adsp_retry`（15s × 240）、`action.sh` 探测+提示等待 60s、
+`late-load.sh` 说明。
+
+### H9.4 调试方法学教训
+
+用 `rmmod` + `insmod` 模拟越狱模式会**假性崩溃**（热卸载 kprobe 不安全），
+必须用「禁用模块（`/data/adb/modules/uv2800/disable`）→ 重启 → 手动 `insmod`」
+才能复现真实越狱路径。
+
+### H9.5 ⚠️ 越狱模式下「解耦」失效（影响 SOC/fcc，**不影响关机**）
+
+⚠️ **先澄清机制**：**0% 不会导致关机** —— 关机由 `vbat_uv`（=2800mV）决定，
+来源是内核 getter hook，**越狱模式下完全正常** ✅。SOC 显示（bind-mount chip_soc）**只影响 UI**。
+
+所以越狱模式下**关机电压 2800mV 真实生效**，手机会一直放到 2800mV 才关机 ✅。
+
+**真正失效的是「解耦」**：
+
+| 模式 | ADSP term | 模型空电点 | 后果 |
+|---|---|---|---|
+| 标准模式 | 2600（service.sh 写）| ≈2800 | SOC/fcc 按解耦后模型算 ✅ |
+| **越狱模式** | **2800**（setter hook 强制）| ≈3000 | SOC/fcc 仍偏保守 ✗（**不影响关机**）|
+
+**根因**：`uv_term_set` hook 强制 `UV_TARGET_MV`（2800），而解耦目标 2600 是
+service.sh 通过 `adsp_write` 写的（依赖 `uv_dev`，越狱下失效）。
+所以越狱模式 fcc 增长 ✅ 但模型下限没压下去 ✗。
+
+**建议修法**：把 `uv_term_set` 的强制值改为可配置 module_param（默认 2600）——
+纯寄存器改写、**不需要 `uv_dev`**，越狱下驱动写一次 term 即生效。
+注意 `uv_term_get`（决定关机电压）必须保持 2800 不变。
+
+**验证方法**：越狱下确认 `adsp_read` == 2600（或 fcc 升到 ~5000），即解耦生效。
+
+
+---
+
+## H10. v10.4/v10.5 越狱解耦修复（逆向 + 实测完整记录）
+
+### H10.1 v10.4 内核：setter 强制值参数化
+
+把 `uv_term_set` 的固定 `UV_TARGET_MV`(2800) 改为 `module_param uv_adsp_force_mv`（默认 2600）。
+依据（COS15/16/17 反汇编）：`oplus_gauge_term_voltage_vote_callback` 内部 `ldr x0,[x21,#0x30]`
+取 wrapper 后直接 `bl oplus_mms_gauge_set_deep_term_volt` → 函数表 → `oplus_fg_set_deep_term_volt`
+（我们 hook 的地方）。**vote 一触发即走 setter，不依赖 `uv_dev`。**
+
+**语义分离**：`uv_term_get`（关机电压）保持 2800 不变；`uv_term_set`（模型下限）强制 `adsp_force`。
+
+### H10.2 关键逆向发现：vote 是事件驱动，不是定时
+
+这是本轮最重要的认知修正（曾误判为「零操作自治」）：
+
+- `GAUGE_TERM_VOLTAGE` votable 的 vote client 是 `DEEP_COUNT_VOTER`，vote 方是
+  `oplus_gauge_get_ddrc_status`（按深度放电次数查 DT `term_coeff` 档位表）。
+- vote 值本身**极少变化**（档位跨度几百~上千次循环）；vote 框架只在 effective 值变化时调 callback。
+- 充电状态**稳定**时 vote 值不变 → setter 不走 → 解耦不触发。
+- **只有「充电状态变化」（最可靠=插拔充电器）或「深度放电跨档」（极罕见）才触发 vote。**
+
+实测（COS17，模拟越狱：禁用模块→重启→手动 insmod）：
+
+```
+insmod 后  : adsp_read=0（uv_dev 未捕获）
+插拔充电器 → vote 触发
+t=778s     : 从 getter 捕获 wrapper=ffffff887a616800
+最终       : adsp_force=2600  ADSP=2600  vbat_uv=2800  fcc=5010（已解耦）
+```
+
+**与 v10.3 的关系**：触发条件完全相同（都需插拔一次），区别是：
+
+- v10.3：插拔后靠 `service.sh` 后台重试 `adsp_write`（依赖 `uv_dev`）写 2600；
+- v10.4/10.5：插拔后靠 vote→setter 直接强制 2600（**不依赖 `uv_dev`**），
+  且 setter 默认值由「拦截成 2800」改为「强制成 2600」。
+
+### H10.3 已废弃的方案 B：work 函数反推 chip→wrapper
+
+曾新增第 6 个 kprobe 挂钩周期性 work 函数入口，`chip = x0 - work_chipoff`、`wrapper = *chip`。
+三版本 work 偏移静态核对（自洽验证通过）：
+
+| 版本 | work 函数 | chip = x0 - |
+|---|---|---|
+| COS17 | oplus_mms_gauge_set_deep_term_volt_work | 0x638 |
+| COS16 | oplus_mms_gauge_sili_term_volt_effect_check_work | 0x558 |
+| COS15 | oplus_mms_gauge_sili_term_volt_effect_check_work | 0x4b8 |
+
+**实测证明冗余**：vote callback 触发时驱动在同一流程里【同步】调用 getter
+（`kp_term_entry` 立即捕获），而 work 是被 `queue_delayed_work`【异步】排的
+（vote callback 里 `mov w3,#0x1f4`=500ms 延迟）—— **getter 捕获永远先命中**，
+work 捕获拿不到任何 getter 给不了的能力，反而多一个 hook 点和内存解引用风险。
+**已从 v10.4 移除**，回归 5 个 hook。
+
+### H10.4 v10.5 脚本精简（用户触点优化）
+
+1. **action.sh 修超时假成功**：v10.3 就绪等待 60s 超时后仍无条件 `echo $TARGET > restore`，
+   sysfs 写永远返回 0 → 结尾照样打「回写完成！」（假成功）。v10.5 改为超时 `exit 1` 硬中止
+   +「电量计未被改动」提示。插拔检测只在 `KSU_LATE_LOAD=1` 启用，标准用户零打扰。
+2. **service.sh 删 1 小时 adsp_retry**：vote 触发只能靠插拔，后台死等 1 小时无意义
+   （用户不插拔永远超时，插拔了前台/action 路径也能处理）。
+3. **adsp_target→adsp_force 同步**：日常解耦不再用 `adsp_write`（依赖 `uv_dev`），
+   改为把 `adsp_target` 值写入内核 `adsp_force` 参数。`adsp_write` 内核参数保留作诊断/手动调试。
+4. **新增 customize.sh**（安装时执行、用户可见）：仅越狱模式提示插拔 + 无时间限制说明。
+5. **文案补全**：module.prop description 标注越狱模式插拔要求。
+
+### H10.5 参数职责最终厘清
+
+| 参数 | 职责 | 依赖 uv_dev |
+|---|---|---|
+| adsp_force | 日常解耦（setter hook 强制值，默认 2600）| ❌ |
+| adsp_read | 就绪探测 / 解耦验证（直读真实值）| ✅ |
+| adsp_write | 诊断 / 手动调试 | ✅ |
+| restore | 卸载回写原值（+ 永久放行 hook）| ✅ |
+
+**结论**：日常解耦与设备指针彻底解耦；`uv_dev` 只在「卸载回写原值」时必需，
+而那本来就需要插拔一次充电器（vote 触发 getter 捕获）。
+
+### H10.6 「自定义关机电压」评估（未实现）
+
+技术上可行（照 `adsp_force` 模式把 `uv_term_get` 的 2800 也做成参数 `shutdown_mv`），
+但有硬件风险：2800mV 是硅碳负极物理放电下限，改低过放损坏电池、改错触发 DOD 钳位
+不自愈（需充满一次恢复）；且 shutdown 必须 ≥ ADSP term 并留余量，否则 SOC/关机行为异常。
+若实现需：范围钳制 2700~3400 + 强制 `shutdown > adsp_force` 校验 + 默认 2800 + 文档标风险。
+**判断：收益小于风险，默认不开放。**

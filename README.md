@@ -71,9 +71,12 @@
 ### 步骤
 
 ```
-1) 用 KernelSU 管理器刷入 一加13解容-v10.3.zip
+1) 用 KernelSU 管理器刷入 一加13解容-v10.5.zip
 2) 重启                                    ← 唯一需要的一次重启
 3) 模块开机后自动写入电量计 term
+   ⚠️ 越狱(late-load)模式：模块加载太晚，错过了驱动开机那次 vote，
+      需【插拔一次充电器】触发 vote（setter 写解耦目标 + getter 捕获回写指针）
+      无时间限制，任意时刻插拔一次即可；不插拔不影响关机保护(2800mV)
 4) 触发一次满电状态切换（三选一）：
      · 充满一次
      · SOC=100 时拔掉充电器
@@ -88,7 +91,7 @@ cat /sys/class/oplus_chg/battery/vbat_uv            # 应为 2800
 P=/sys/module/uv2800/parameters
 echo 1 > $P/adsp_read; cat $P/adsp_read             # 2600（或 2800）
 cat /sys/class/oplus_chg/battery/battery_fcc        # ~5000（解容后）
-dmesg | grep "uv2800:"                              # v10 ready, 5 个 hook
+dmesg | grep "uv2800:"                              # v10.4 ready, 5 个 hook
 ```
 
 ---
@@ -144,11 +147,11 @@ dmesg | grep "uv2800:"                              # v10 ready, 5 个 hook
 └── _work/
     ├── ksu-module/
     │   ├── uv2800/           KernelSU 模块源（7 个文件）
-    │   ├── 一加13解容-v10.3.zip    ★ 当前发布包
+    │   ├── 一加13解容-v10.5.zip    ★ 当前发布包
     │   └── uv2800.zip        v9.2 发布包（保留）
     └── uv2800/
-        ├── uv2800_v10.c      ★ 当前内核源码（510 行）
-        ├── uv2800_v10.ko
+        ├── uv2800_v10.4.c   ★ 当前内核源码（含 adsp_force 参数）
+        ├── uv2800_v10.4.ko
         ├── Makefile
         ├── archive_deprecated/   旧版本源码 v3~v13（.c + .ko）
         └── docs/                 实测图表（放电曲线 / 对比图）
