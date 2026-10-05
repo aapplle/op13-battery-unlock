@@ -1,0 +1,62 @@
+name: Release
+
+# 发布流程：从 `模块源目录/` 打包出可刷入的 zip，并作为 Release 资产发布。
+#
+#   · push tag（v*）  → 打包 + 建 Release
+#   · 手动触发        → 只打包，产物在 Actions 的 Artifacts 里
+#
+# 说明：本工作流【不重新编译】—— `模块源目录/uv2800.ko` 随仓库提交，
+#       且自 v11 起逐字节未变。若改动了 `内核源码/uv2800.c`，请先在本地
+#       运行 `自动化测试矩阵/build.sh`（它会拉内核树、编译、同步 .ko 进
+#       `模块源目录/`）并提交新的 .ko，再打 tag。
+#       编译步骤见 THIRD-PARTY-NOTICES.md §1.4。
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: 从 模块源目录/ 构建 zip
+        id: build
+        run: |
+          set -euo pipefail
+          VER="$(grep '^version=' 模块源目录/module.prop | cut -d= -f2)"
+          VCODE="$(grep '^versionCode=' 模块源目录/module.prop | cut -d= -f2)"
+          NAME="一加13解容-v${VER}.zip"
+          rm -f "$NAME"
+          ( cd 模块源目录 && zip -q -r "$GITHUB_WORKSPACE/$NAME" . -x '*.prev' )
+          echo "name=$NAME"     >> "$GITHUB_OUTPUT"
+          echo "ver=$VER"       >> "$GITHUB_OUTPUT"
+          echo "vcode=$VCODE"   >> "$GITHUB_OUTPUT"
+          echo "=== 产物 ==="
+          ls -la "$NAME"
+          md5sum "$NAME"
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: module-zip
+          path: ${{ steps.build.outputs.name }}
+          if-no-files-found: error
+
+      - name: 发布 Release（仅 tag 触发）
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.build.outputs.name }}
+          generate_release_notes: true
+          body: |
+            一加 13 解容模块 uv2800 v${{ steps.build.outputs.ver }}（versionCode ${{ steps.build.outputs.vcode }}）
+
+            刷入前请阅读 [README.md](README.md)；卸载务必先点模块的「执行」按钮。
+            第三方与上游来源见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
