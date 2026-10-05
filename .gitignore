@@ -1,20 +1,31 @@
-# 构建产物（如需可自行编译）
-*.o
-*.mod
-*.mod.c
-*.symvers
-*.order
-.tmp_versions/
-Module.symvers
+# 由 fetch-kernel.sh 拉取的上游内核树（不随仓库分发）
+/编译用内核树/
 
-# 编辑器 / 系统
-.vscode/
-.idea/
-*.swp
-.DS_Store
-Thumbs.db
+# 模块构建中间产物
+/内核源码/*.o
+/内核源码/*.cmd
+/内核源码/*.mod
+/内核源码/*.mod.c
+/内核源码/*.symvers
+/内核源码/*.order
+/内核源码/modules.order
+/内核源码/.tmp_versions/
 
-# 本地临时
+# 测试矩阵运行输出（每次运行重新生成）
+/自动化测试矩阵/results/
+
+# 按需拉取的 GhostLock 官方二进制（fetch-ghostlock.sh 生成，不随仓库分发）
+/自动化测试矩阵/手机测试环境准备/ghostlock-越狱工具/ghostlock
+/自动化测试矩阵/手机测试环境准备/ghostlock-越狱工具/ghostlock-extract-*
+/自动化测试矩阵/手机测试环境准备/ghostlock-越狱工具/GhostLock-*.apk
+/自动化测试矩阵/手机测试环境准备/ghostlock-越狱工具/profiles-官方/
+/自动化测试矩阵/手机测试环境准备/设备文件/data/local/tmp/ghostlock
+
+# Release 产物（由 自动化测试矩阵/build.sh 或 GitHub Actions 生成）
+/一加13解容-v*.zip
+
+# 备份 / 临时文件
+*.prev
+*.bak
 *.tmp
-*.log
-!archive_deprecated/*.log
+.DS_Store
