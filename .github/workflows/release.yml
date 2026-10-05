@@ -5,11 +5,13 @@ name: Release
 #   · push tag（v*）  → 打包 + 建 Release
 #   · 手动触发        → 只打包，产物在 Actions 的 Artifacts 里
 #
-# 说明：本工作流【不重新编译】—— `模块源目录/uv2800.ko` 随仓库提交，
-#       且自 v11 起逐字节未变。若改动了 `内核源码/uv2800.c`，请先在本地
-#       运行 `自动化测试矩阵/build.sh`（它会拉内核树、编译、同步 .ko 进
-#       `模块源目录/`）并提交新的 .ko，再打 tag。
-#       编译步骤见 THIRD-PARTY-NOTICES.md §1.4。
+# 说明：
+#  1) 本工作流【不重新编译】—— `模块源目录/uv2800.ko` 随仓库提交，且自 v11 起逐字节未变。
+#     若改动了 `内核源码/uv2800.c`，请先在本地运行 `自动化测试矩阵/build.sh`
+#     （它会拉内核树、编译、同步 .ko 进 `模块源目录/`）并提交新的 .ko，再打 tag。
+#     编译步骤见 THIRD-PARTY-NOTICES.md §1.4。
+#  2) 资产名**必须用 ASCII**：softprops/action-gh-release 会把非 ASCII 文件名截坏
+#     （实测 `一加13解容-v11.zip` → `13.-v11.zip`）。zip 内容不受影响，刷入时文件名无所谓。
 
 on:
   push:
@@ -22,6 +24,9 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -32,15 +37,18 @@ jobs:
           set -euo pipefail
           VER="$(grep '^version=' 模块源目录/module.prop | cut -d= -f2)"
           VCODE="$(grep '^versionCode=' 模块源目录/module.prop | cut -d= -f2)"
-          NAME="一加13解容-v${VER}.zip"
+          # 资产名固定为 ASCII：action-gh-release 会把非 ASCII 文件名截坏
+          NAME="op13-battery-unlock.zip"
           rm -f "$NAME"
           ( cd 模块源目录 && zip -q -r "$GITHUB_WORKSPACE/$NAME" . -x '*.prev' )
+          MD5="$(md5sum "$NAME" | cut -d' ' -f1)"
           echo "name=$NAME"     >> "$GITHUB_OUTPUT"
           echo "ver=$VER"       >> "$GITHUB_OUTPUT"
           echo "vcode=$VCODE"   >> "$GITHUB_OUTPUT"
+          echo "md5=$MD5"       >> "$GITHUB_OUTPUT"
           echo "=== 产物 ==="
           ls -la "$NAME"
-          md5sum "$NAME"
+          echo "$MD5  $NAME"
 
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
@@ -53,10 +61,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
+          name: 一加13解容 uv2800 v${{ steps.build.outputs.ver }}
           files: ${{ steps.build.outputs.name }}
+          body_path: RELEASE-NOTES.md
           generate_release_notes: true
-          body: |
-            一加 13 解容模块 uv2800 v${{ steps.build.outputs.ver }}（versionCode ${{ steps.build.outputs.vcode }}）
-
-            刷入前请阅读 [README.md](README.md)；卸载务必先点模块的「执行」按钮。
-            第三方与上游来源见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
