@@ -24,6 +24,7 @@ CAPUE=/sys/class/power_supply/battery/uevent
 # 日志函数（stdout + dmesg + 落盘到备份目录），见 log.sh
 [ -f "$MODDIR/log.sh" ] && . "$MODDIR/log.sh"
 command -v uv_log >/dev/null 2>&1 || uv_log() { echo "uv2800: $*"; }
+uv_lock || exit 1
 klog() { uv_log "$@"; }
 
 # 原值备份统一入口
@@ -43,48 +44,22 @@ backup_orig() {
         # 拒绝时用 DT 值回填，避免文件保持缺失
         _dt=$(uv_dt_orig 2>/dev/null)
         if [ -n "$_dt" ]; then
-            echo "$_dt" > "$BK/adsp_orig.txt"
+            echo "$_dt" > "$BK/adsp_orig.txt" || return 1
             klog "⚠️ 读到的电量计值 ${_v} mV <= FLOOR=${FLOOR_MV}，疑似已被本模块修改，已用 DT 值回填 ${_dt} mV"
+            return 0
         else
             klog "⚠️ 读到的电量计值 ${_v} mV <= FLOOR=${FLOOR_MV}，疑似已被本模块修改，【拒绝备份】（DT 查表失败）"
         fi
         return 1
     fi
-    echo "$_v" > "$BK/adsp_orig.txt"
+    echo "$_v" > "$BK/adsp_orig.txt" || return 1
     klog "已备份电量计原始终止电压 = ${_v} mV"
     return 0
 }
 
-# 查询模块最后一次【成功写入】的电量计终止电压记录（$BK/adsp_state）。
-# 用途：越狱/硬重启后 uv_dev 可能为 NULL（读不了 ADSP），此时若记录显示
-#   已经是目标值，就无需回写（不做后台补写，只做状态判定）。
-# 只在写入后【读回校验一致】时才记录；卸载时会清除，避免跨模块生命周期失效。
-adsp_known() {
-    _k=$(cat "$BK/adsp_state" 2>/dev/null | tr -d "[:space:]")
-    case "$_k" in ''|*[!0-9]*) return 1 ;; esac
-    [ "$_k" = "$1" ] && return 0
-    return 1
-}
-
 uv_log_sep "service.sh 开始（KSU_LATE_LOAD=$KSU_LATE_LOAD）"
 
-# 兜底：扫描并清理【所有】其他 service.sh 进程（
-# 管不了更早的遗留进程 —— 实测发现旧版本残留的僵尸进程会一直存活到 1 小时超时）。
-# 只保留当前进程自己（$$）。
-_me=$$
-_n=0
-for _p in /proc/[0-9]*; do
-    _pid=${_p#/proc/}
-    [ "$_pid" = "$_me" ] && continue
-    case "$_pid" in ""|*[!0-9]*) continue ;; esac
-    _c=$(cat "$_p/cmdline" 2>/dev/null | tr "\0" " ")
-    case "$_c" in
-        *uv2800/service.sh*)
-            kill "$_pid" 2>/dev/null && _n=$((_n+1))
-            ;;
-    esac
-done
-[ "$_n" -gt 0 ] && klog "已清理 $_n 个遗留的 service.sh 进程（只保留当前 pid=$$）"
+# flock 串行化本次完整操作；不再按进程名杀掉其它实例。
 
 # late-load（越狱）模式下系统已完全启动，不需要等待；标准启动才需要
 # 主动触发捕获通常 1 秒内就绪，这里只留 5 秒保险，不必长时间 sleep
@@ -96,29 +71,15 @@ fi
 
 # --- 1) 兜底 insmod（post-fs-data 时 oplus_chg_v2 可能还没就绪）---
 if ! lsmod | grep -q "^uv2800"; then
-    insmod "$MODDIR/uv2800.ko" 2>/dev/null
-    klog "service.sh 兜底 insmod rc=$?"
+    if ! insmod "$MODDIR/uv2800.ko"; then
+        klog "错误：内核模块加载失败，停止应用"
+        exit 1
+    fi
 fi
 
-mkdir -p "$BK"
-
-# --- 1.5) ★ 统一退出「恢复模式」（放在分支之前，所有分支都被覆盖）-------
-# 【为什么统一在这里】把 uv_bypass 置 1（放行所有 hook）之后，内核里【没有】
-#   任何自动复位路径，只能由用户态显式写 resume。
-#   只要漏掉一处，vbat_uv 就会停在驱动自己算出的值、不跟随 uv_target_mv。
-#   所以在这里复位一次，任何分支（含 no_adsp_write / skip / 解耦）都覆盖，
-#   不必逐个分支各补一次。
-#   （③④ hook 同属 uv_bypass 管辖，一并被放行/恢复。）
-# 【实测依据】hook 生效（resume=0）时 vbat_uv 就是 uv_target_mv 的【即时镜像】：
-#   改 uv_target_mv=3000/3100/3250，vbat_uv 逐字跟随，零延迟、无需 vote。
-#   vbat_uv 不跟随只有一个原因 —— hook 被旁路了，
-#   不是"驱动缓存需要插拔才能刷新"。
-if [ "$(cat "$P/resume" 2>/dev/null)" = "1" ]; then
-    klog "检测到内核 hook 处于恢复模式（uv_bypass=1），写 resume=1 统一复位"
-    echo 1 > "$P/resume" 2>/dev/null
-    sleep 1
-    klog "hook 已复位（resume=$(cat "$P/resume" 2>/dev/null)），vbat_uv=$(cat /sys/class/oplus_chg/battery/vbat_uv 2>/dev/null)"
-fi
+mkdir -p "$BK" || exit 1
+_status=0
+_restore_verified=0
 
 # --- 1.6) ★ 自动捕获 uv_dev ----------------------------------------
 # 【为什么】uv_dev 只能由 oplus_fg_get_deep_term_volt 入口捕获，而该函数
@@ -127,15 +88,14 @@ fi
 #   【完全相同】，而写 deep_dischg_counts（同值即可）就能触发它。
 #   所以这里主动触发一次，后续 adsp_read/adsp_write 立即可用。
 #   失败也不影响：后续分支仍有兜底逻辑处理。
-echo 1 > "$P/adsp_read" 2>/dev/null
-_uvd=$(cat "$P/adsp_read" 2>/dev/null)
+_uvd=$(uv_read_adsp "$P") || _uvd=0
 case "$_uvd" in ''|*[!0-9]*) _uvd=0 ;; esac
 if [ "$_uvd" -le 2000 ] 2>/dev/null; then
     klog "uv_dev 未捕获，主动触发 deep_dischg 入口"
     uv_capture_dev
     sleep 1
-    echo 1 > "$P/adsp_read" 2>/dev/null
-    klog "触发后 adsp_read=$(cat "$P/adsp_read" 2>/dev/null)"
+    _uvd=$(uv_read_adsp "$P") || _uvd=0
+    klog "触发后 adsp_read=$_uvd"
 fi
 
 # --- * 关机电压自定义 + ADSP 自动派生 -------------------------------
@@ -178,141 +138,80 @@ klog "关机电压 V_s=${V_S} mV，ADSP 派生=${ADSP_TARGET} mV（偏移 ${_off
 
 
 
-if [ -f "$BK/no_adsp_write" ]; then
-    klog "检测到 no_adsp_write 标记，本次不写电量计终止电压（测试用）"
-elif [ -f "$BK/skip" ]; then
-    # skip 由 action.sh 回写原值后创建。若存在说明用户已手动恢复，
-    # 本次开机/软重启【不再】重新施加解耦，否则会把用户的恢复覆盖回解耦目标。
-    klog "检测到 skip 标记（已手动恢复原值），本次不施加解耦"
-    # --- ★ skip 语义 = 完全恢复原厂，三件事都要做到
-    # 【为什么不能用恢复模式代替】写 resume=0 是【进入】恢复模式，方向反了：
-    #   它（uv_bypass=1）只能让 hook"不再污染"，无法修正已经被污染的值。
-    # 【正确做法】hook 直接返回运行时参数 uv_target_mv：
-    #   只要 hook 生效（uv_bypass=0），vbat_uv 就是它的【即时镜像】——
-    #   不依赖任何 vote、不怕模块重载。
-    # 【ADSP 也要一起恢复】否则"skip 存在但 ADSP 仍是解耦目标"仍不一致
-    #   （手动 touch skip、或 rm skip 解耦后再 touch skip 都会留下解耦目标）。
+if [ -f "$BK/skip" ]; then
+    # skip 是恢复意图；restore_pending 存在表示本次尚未实时验证完成。
+    touch "$BK/restore_pending" || exit 1
+    rm -f "$BK/adsp_state" || exit 1
     _orig=$(cat "$BK/adsp_orig.txt" 2>/dev/null | tr -d "[:space:]")
-    case "$_orig" in ""|*[!0-9]*) _orig="" ;; esac
-    # adsp_orig.txt 缺失/无效/疑似污染时，回退到 DT 查表
-    # 读取侧静态判据：<3000 视为污染（DT 表最低档 = 3000），走 DT 兜底
+    case "$_orig" in ''|*[!0-9]*) _orig="" ;; esac
     if [ -z "$_orig" ] || [ "$_orig" -lt 3000 ] 2>/dev/null || [ "$_orig" -gt 5000 ] 2>/dev/null; then
-        _orig=$(uv_dt_orig)
+        _orig=$(uv_dt_orig) || _orig=""
         if [ -n "$_orig" ]; then
-            klog "adsp_orig.txt 不可用，已从 DT 表计算原值 = ${_orig} mV"
-            echo "$_orig" > "$BK/adsp_orig.txt"
+            echo "$_orig" > "$BK/adsp_orig.txt" || exit 1
         fi
     fi
-    if [ -n "$_orig" ] && [ "$_orig" -ge 3000 ] 2>/dev/null && [ "$_orig" -le 5000 ] 2>/dev/null; then
-        # ① hook 强制值设为原厂（保证 vbat_uv 恒为原厂）。
-        #    退出「恢复模式」已提到脚本开头统一处理（见 1.5 节），这里只设值。
-        if [ "$(cat "$P/uv_target_mv" 2>/dev/null)" != "$_orig" ]; then
-            echo "$_orig" > "$P/uv_target_mv" 2>/dev/null
-            sleep 1
-            klog "已把内核 hook 强制值设为原厂 ${_orig} mV，vbat_uv=$(cat /sys/class/oplus_chg/battery/vbat_uv 2>/dev/null)"
-        fi
-        # ② ★ 同时把 ADSP 也恢复为原厂（skip 语义 = 完全恢复原厂）。
-        #   只改 hook 不改 ADSP 会造成"skip 存在但 ADSP 仍是解耦目标"的不一致：
-        #   手动 touch skip、或 rm skip 解耦后再 touch skip，都会留下解耦目标。
-        #   写入后读回校验，一致才记录 adsp_state（供 uv_dev 未捕获时判定）。
-        _cur=$(echo 1 > "$P/adsp_read" 2>/dev/null; cat "$P/adsp_read" 2>/dev/null)
-        if [ -n "$_cur" ] && [ "$_cur" -gt 2000 ] 2>/dev/null; then
-            # 无论是否需要回写，都先同步 uv_adsp_mv（消除状态不一致）
-            echo "$_orig" > "$P/uv_adsp_mv" 2>/dev/null
-            if [ "$_cur" != "$_orig" ]; then
-                echo "$_orig" > "$P/adsp_write" 2>/dev/null
-                _rb=$(echo 1 > "$P/adsp_read" 2>/dev/null; cat "$P/adsp_read" 2>/dev/null)
-                klog "已把 ADSP 恢复为原厂 ${_orig} mV（原 ${_cur}，读回 ${_rb}）"
-                [ "$_rb" = "$_orig" ] && echo "$_orig" > "$BK/adsp_state" 2>/dev/null
+    if [ -n "$_orig" ] && uv_set_targets "$_orig" "$_orig" "$P"; then
+        # 指针未捕获也必须先同步两个 hook，避免后续厂商 setter 继续写解耦值。
+        _cur=$(uv_read_adsp "$P") || _cur=""
+        if [ -n "$_cur" ]; then
+            if [ "$_cur" != "$_orig" ] && ! echo "$_orig" > "$P/adsp_write"; then
+                klog "错误：原厂 ADSP 回写失败，保留恢复待办"
+                _status=1
+            fi
+            _rb=$(uv_read_adsp "$P") || _rb=""
+            if [ "$_status" = 0 ] && [ "$_rb" = "$_orig" ]; then
+                echo "$_orig" > "$BK/adsp_state" || exit 1
+                _restore_verified=1
+                klog "已实时验证 ADSP 恢复为原厂 ${_orig} mV"
             else
-                klog "ADSP 已是原厂 ${_orig} mV，无需恢复"
-                echo "$_orig" > "$BK/adsp_state" 2>/dev/null
+                klog "错误：原厂 ADSP 校验失败（读回 ${_rb:-未知}，目标 $_orig），保留恢复待办"
+                _status=1
             fi
         else
-            # ③ ★ uv_dev 未捕获时，若记录显示已是原厂就跳过恢复。
-            #    不做后台补写：主动触发后通常 1 秒即就绪，前面的探测循环
-            #    已相当于同步重试，此处只做状态判定，不另起兜底进程。
-            if adsp_known "$_orig"; then
-                klog "uv_dev 未捕获，但 adsp_state 记录显示 ADSP 已是原厂 ${_orig} mV，无需恢复"
-            else
-                klog "⚠️ ADSP 未就绪（uv_dev 未捕获），本次无法恢复原厂 ${_orig} mV"
-            fi
+            klog "错误：ADSP 读取失败，两个 hook 已设原厂值；保留恢复待办，下次启动重试"
+            _status=1
         fi
     else
-        klog "⚠️ adsp_orig.txt 不可用（无原值记录），无法设置原厂强制值"
+        klog "错误：原厂值计算或 hook 参数设置失败，保留恢复待办"
+        _status=1
     fi
-    klog "若要重新自动解耦，请执行：rm $BK/skip 后重启"
-elif [ -w "$P/adsp_read" ]; then
-    # --- ★ 把 hook 强制值设为用户自定义的 V_s -------------------------
-    # 若上一轮处于 skip（已恢复原厂）模式，uv_target_mv 被设成了原厂值；
-    # 这里（解耦模式）必须复位回 V_s，否则 hook 会继续强制原厂值，解耦失效。
-    if [ "$(cat "$P/uv_target_mv" 2>/dev/null)" != "$V_S" ]; then
-        echo "$V_S" > "$P/uv_target_mv" 2>/dev/null
-        klog "已把内核 hook 强制值设为 ${V_S} mV（解耦模式）"
-    fi
-    # 无条件同步 uv_adsp_mv（③④ hook 的目标），防止残留默认值/上轮值
-    echo "$ADSP_TARGET" > "$P/uv_adsp_mv" 2>/dev/null
-
-    # 退出「恢复模式」已提到脚本开头统一处理（见 1.5 节）。
-
-    # 探测 uv_dev 是否就绪。主动触发捕获后通常 0-1 秒就绪，10 秒足够。
-    i=0; cur=""; _probe=ok
-    while [ $i -lt 10 ]; do
-        # 用户点「执行」后会出现 skip 标记，立刻停手，不要覆盖用户的恢复
-        if [ -f "$BK/skip" ]; then
-            klog "检测到 skip 标记（用户已手动恢复），停止解耦探测"
-            _probe=skip
-            break
-        fi
-        echo 1 > "$P/adsp_read" 2>/dev/null
-        cur=$(cat "$P/adsp_read" 2>/dev/null)
-        [ -n "$cur" ] && [ "$cur" -gt 2000 ] 2>/dev/null && break
+elif [ -f "$BK/no_adsp_write" ]; then
+    klog "检测到 no_adsp_write 标记，本次不写电量计终止电压（测试用）"
+else
+    uv_set_targets "$V_S" "$ADSP_TARGET" "$P" || { klog "错误：设置解耦 hook 参数失败"; exit 1; }
+    # 持锁期间 action 会等待；不再通过非原子的 skip 检查协调写入。
+    i=0; cur=""
+    while [ "$i" -lt 10 ]; do
+        cur=$(uv_read_adsp "$P") && break
         cur=""
         sleep 1
         i=$((i+1))
     done
-
-    # 内核侧 adsp_read 默认静默（见 adsp_debug 参数），改由这里汇总一条。
-    # 既保留「就绪耗时」这个真正有用的指标，又消掉每次开机最多 10 行（探测循环 10 次）的 dmesg 噪音。
-    if [ "$_probe" = "ok" ]; then
-        if [ -n "$cur" ]; then
-            klog "ADSP 探测：${i}s 后就绪（终止电压 ${cur} mV）"
-        else
-            klog "⚠️ ADSP 探测：等待 ${i}s 未就绪（uv_dev 未捕获），本次放弃写入，将在下次开机重试"
-        fi
-    fi
-
-    # skip 出现后不再写入（防止覆盖用户刚恢复的原值）
-    [ -f "$BK/skip" ] && cur=""
-
+    rm -f "$BK/adsp_state" || exit 1
     if [ -n "$cur" ]; then
-        # ① uv_dev 就绪：主动写入（写后读回校验，一致才记录 adsp_state）
         if [ "$cur" != "$ADSP_TARGET" ]; then
-            backup_orig "$cur"
-            # 先同步 uv_adsp_mv（③④ hook 的目标），再写 ADSP
-            echo "$ADSP_TARGET" > "$P/uv_adsp_mv" 2>/dev/null
-            echo "$ADSP_TARGET" > "$P/adsp_write"
-            _rb=$(echo 1 > "$P/adsp_read" 2>/dev/null; cat "$P/adsp_read" 2>/dev/null)
-            klog "电量计终止电压 ${cur} -> ${ADSP_TARGET} mV（读回 ${_rb}，满电状态切换后重算 fcc）"
-            [ "$_rb" = "$ADSP_TARGET" ] && echo "$ADSP_TARGET" > "$BK/adsp_state" 2>/dev/null
-        else
-            klog "电量计终止电压已是 ${ADSP_TARGET} mV，无需写入"
-            echo "$ADSP_TARGET" > "$BK/adsp_state" 2>/dev/null
-            # ADSP 已是目标值时，若 adsp_orig.txt 缺失也用 DT 回填
-            if [ ! -f "$BK/adsp_orig.txt" ]; then
-                _dt=$(uv_dt_orig 2>/dev/null)
-                [ -n "$_dt" ] && echo "$_dt" > "$BK/adsp_orig.txt"
+            if ! backup_orig "$cur"; then
+                klog "错误：原值备份失败，本次停止 ADSP 主动写入"
+                _status=1
+            elif ! echo "$ADSP_TARGET" > "$P/adsp_write"; then
+                klog "错误：ADSP 解耦写入失败"
+                _status=1
             fi
+        elif [ ! -f "$BK/adsp_orig.txt" ]; then
+            _dt=$(uv_dt_orig) || _dt=""
+            [ -z "$_dt" ] || echo "$_dt" > "$BK/adsp_orig.txt"
+        fi
+        _rb=$(uv_read_adsp "$P") || _rb=""
+        if [ "$_status" = 0 ] && [ "$_rb" = "$ADSP_TARGET" ]; then
+            echo "$ADSP_TARGET" > "$BK/adsp_state" || exit 1
+            klog "ADSP ${ADSP_TARGET} mV 已实时验证（就绪耗时 ${i}s）"
+        else
+            klog "错误：ADSP 校验失败（读回 ${_rb:-未知}，目标 $ADSP_TARGET）"
+            _status=1
         fi
     else
-        # ② uv_dev 未就绪：前面已用自动捕获尝试过（写 deep_dischg_counts 同值）。
-        #    不做后台补写 —— 驱动不支持该入口时，本次开机即放弃写入，
-        #    由下次开机重试（实测正常驱动 1 秒内就绪）。
-        if adsp_known "$ADSP_TARGET"; then
-            klog "uv_dev 未捕获，但 adsp_state 记录显示 ADSP 已是 ${ADSP_TARGET} mV，无需写入"
-        else
-            klog "⚠️ 读不到电量计终止电压（uv_dev 未就绪），本次无法写入 ${ADSP_TARGET} mV"
-        fi
+        klog "错误：等待 ${i}s 仍未读到电量计，本次未确认 ADSP，下次启动重试"
+        _status=1
     fi
 fi
 # --- 3) ★ 显示真实电量：bind-mount chip_soc -> capacity ---------------
@@ -374,25 +273,26 @@ if [ -f "$BK/skip" ]; then
     if [ -f "$BK/orig_state" ]; then
         if [ "$(cat "$BK/orig_state" 2>/dev/null)" = "existed" ]; then
             if [ -f "$BK/devicepolicy_orig.xml" ]; then
-                cp -f "$BK/devicepolicy_orig.xml" "$XML"
+                cp -f "$BK/devicepolicy_orig.xml" "$XML" || _status=1
                 chown system:system "$XML" 2>/dev/null
                 chmod 600 "$XML" 2>/dev/null
             else
                 # 原文件存在但备份丢失 → 不动文件，报警
                 klog "⚠️ 设备策略备份丢失（orig_state=existed 但 devicepolicy_orig.xml 不存在），保留当前文件"
+                _status=1
             fi
         else
-            rm -f "$XML"
+            rm -f "$XML" || _status=1
         fi
     fi
-    su 1000 -c "service call oplusdevicepolicy 1 s16 $KEY s16 false i32 1" >/dev/null 2>&1
+    su 1000 -c "service call oplusdevicepolicy 1 s16 $KEY s16 false i32 1" >/dev/null 2>&1 || _status=1
     rm -f "$BK/applied"
     klog "检测到 skip 标记（已手动恢复），已恢复设备策略"
     klog "若要重新自动应用，请 rm $BK/skip"
 else
     if [ ! -f "$BK/applied" ]; then
         if [ -f "$XML" ]; then
-            cp -f "$XML" "$BK/devicepolicy_orig.xml"
+            cp -f "$XML" "$BK/devicepolicy_orig.xml" || exit 1
             echo "existed" > "$BK/orig_state"
         else
             echo "absent" > "$BK/orig_state"
@@ -409,15 +309,21 @@ else
             *"Transaction too large"*)
                 klog "⚠️ oplusdevicepolicy 出现 Transaction too large（/data/system 下策略 XML 堆积）"
                 klog "   请将本日志反馈作者；本次跳过设备策略，不影响其他功能"
-                ok=-1; break ;;
+                ok=-1; _status=1; break ;;
         esac
         sleep 1
         i=$((i+1))
     done
     if [ "$ok" = "1" ]; then
-        su 1000 -c "service call oplusdevicepolicy 1 s16 $KEY s16 true i32 1" >/dev/null 2>&1
+        su 1000 -c "service call oplusdevicepolicy 1 s16 $KEY s16 true i32 1" >/dev/null 2>&1 || _status=1
         klog "设备策略 $KEY=true（waited ${i}s）"
     elif [ "$ok" = "0" ]; then
         klog "⚠️ 等待 oplusdevicepolicy 服务超时（60s），设备策略未应用（下次开机重试）"
+        _status=1
     fi
 fi
+
+if [ "$_restore_verified" = 1 ] && [ "$_status" = 0 ]; then
+    rm -f "$BK/restore_pending" || exit 1
+fi
+exit "$_status"

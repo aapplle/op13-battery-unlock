@@ -39,7 +39,7 @@
 # ============================================================
 set -uo pipefail
 
-HERE="$(cd "$(dirname "$0")" && pwd)"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SELF="${BASH_SOURCE[0]:-$0}"        # --list / 用例表解析都读本文件自己
 DEV_DIR="$HERE/dev"
 DEV_TMP=/data/local/tmp/uvtest
@@ -134,15 +134,20 @@ sh_dev() {
 
 # ---------------- 快照与断言 ----------------
 snap() {
-  local raw
-  raw="$(sh_dev "$DEV_DIR/snap.sh")" || { warn "snap 失败（设备不可达？）"; return 1; }
-  declare -gA S=()   # P2-17：显式全局关联数组（避免下标被当算术表达式）
+  local raw k v
+  S=()   # 读取失败也必须丢弃前次快照，避免断言使用旧状态。
+  raw="$(sh_dev "$DEV_DIR/snap.sh")" || { collection_failed "snap 读取失败"; return 1; }
   while IFS='=' read -r k v; do
     [ -n "$k" ] && S["$k"]="$v"
   done <<< "$raw"
-  [ "${S[ts]:-}" != "" ] || { warn "snap 内容异常"; return 1; }
+  [ "${S[ts]:-}" != "" ] || { S=(); collection_failed "snap 内容异常"; return 1; }
   echo "$raw" > "$OUT/logs/${CUR_ID:-snap}.snap"
   return 0
+}
+
+collection_failed() {
+  bad "$1"
+  CASE_ASSERTS+=("FAIL|$1|collection|failed|fresh data required")
 }
 
 # 设备上的模块是否与 zip【逐文件全等】（比只比 .ko md5 更强：脚本被换也能发现）
@@ -254,6 +259,7 @@ ensure_module() {
   TESTED_ZIP="$ZIP"
   TESTED_VER="$(unzip -p "$ZIP" module.prop 2>/dev/null | sed -n 's/^version=//p' | tr -d "\r")"
   TESTED_MD5="$(md5sum "$ZIP" 2>/dev/null | cut -d" " -f1)"
+  TESTED_SHA256="$(sha256sum "$ZIP" 2>/dev/null | cut -d" " -f1)"
   say "模块就绪：版本=$TESTED_VER  target=${S[param_target]:-?} adsp=${S[param_adsp]:-?} resume=${S[param_resume]:-?} vbat_uv=${S[vbat_uv]:-?}"
 }
 
@@ -262,8 +268,7 @@ wait_key() {
   local k="${1:-}" exp="${2:-}" max="${3:-10}" i=0
   [ -z "$k" ] && return 1
   while [ "$i" -lt "$max" ]; do
-    snap >/dev/null 2>&1
-    [ -z "$k" ] && return 1
+    snap >/dev/null 2>&1 || return 1
     [ "${S["$k"]:-}" = "$exp" ] 2>/dev/null && return 0
     sleep 1; i=$((i+1))
   done
@@ -280,28 +285,34 @@ derived_adsp() {
 # T9：竞态/残留快照（模块唯一性 / 残留进程 / 僵尸 / 状态一致性）
 race_snap() {
   local raw k v
-  raw="$(sh_dev "$DEV_DIR/racesnap.sh")" || { warn "racesnap 失败（设备不可达？）"; return 1; }
   R=()
+  raw="$(sh_dev "$DEV_DIR/racesnap.sh")" || { collection_failed "racesnap 读取失败"; return 1; }
   while IFS='=' read -r k v; do
     [ -n "$k" ] && R["$k"]="$v"
   done <<< "$raw"
+  [ -n "${R[mods]:-}" ] || { R=(); collection_failed "racesnap 内容异常"; return 1; }
   echo "$raw" > "$OUT/logs/${CUR_ID:-racesnap}.racesnap"
   return 0
 }
 
 # 采集启动路线（dev/route.sh）→ 合并进 DV[]；UV_ROUTE 可强制覆盖
 refresh_route() {
+  local raw k v
+  for k in "${ROUTE_KEYS[@]:-}"; do [ -z "$k" ] || unset 'DV[$k]'; done
+  ROUTE_KEYS=()
+  ROUTE=unknown; ROUTE_SRC=""
   if [ -n "${UV_ROUTE:-}" ]; then
     ROUTE="$UV_ROUTE"; ROUTE_SRC=env
     DV[boot_route]="$ROUTE"; DV[route_src]=env; DV[route_evidence]="UV_ROUTE 强制指定"
+    ROUTE_KEYS=(boot_route route_src route_evidence)
     return 0
   fi
-  local raw k v
-  raw="$(sh_dev "$DEV_DIR/route.sh")" || { warn "route.sh 采集失败"; return 1; }
+  raw="$(sh_dev "$DEV_DIR/route.sh")" || { collection_failed "route.sh 采集失败"; return 1; }
   while IFS='=' read -r k v; do
-    [ -n "$k" ] && DV["$k"]="$v"
+    if [ -n "$k" ]; then DV["$k"]="$v"; ROUTE_KEYS+=("$k"); fi
   done <<< "$raw"
   ROUTE="${DV[boot_route]:-unknown}"; ROUTE_SRC="${DV[route_src]:-?}"
+  [ "$ROUTE" != unknown ] || { collection_failed "route.sh 路线不明"; return 1; }
   return 0
 }
 
@@ -309,6 +320,7 @@ refresh_route() {
 AR() {
   local d="$1" k="$2" op="$3"; shift 3
   local got="${R[$k]:-<缺失>}" exp="$*"
+  case "$got" in '<缺失>'|'?') collection_failed "$d：$k 缺少有效读数"; return 1 ;; esac
   local pass=0
   case "$op" in
     eq) [ "$got" = "$exp" ] && pass=1 ;;
@@ -324,6 +336,7 @@ AR() {
 A() {
   local d="$1" k="$2" op="$3"; shift 3
   local got="${S[$k]:-<缺失>}" exp="$*"
+  case "$got" in '<缺失>'|'?') collection_failed "$d：$k 缺少有效读数"; return 1 ;; esac
   local pass=0
   case "$op" in
     eq)      [ "$got" = "$exp" ] && pass=1 ;;
@@ -341,6 +354,7 @@ A() {
 AD() {
   local d="$1" k="$2" op="$3"; shift 3
   local got="${DV[$k]:-<缺失>}" exp="$*"
+  case "$got" in '<缺失>'|'?') collection_failed "$d：$k 缺少有效读数"; return 1 ;; esac
   local pass=0
   case "$op" in
     eq)       [ "$got" = "$exp" ] && pass=1 ;;
@@ -357,7 +371,7 @@ AD() {
 A_log() {
   local d="$1" pat="$2"
   local n="${3:-120}"
-  local t; t="$(sh_dev "$DEV_DIR/logtail.sh" "$n")"
+  local t; t="$(sh_dev "$DEV_DIR/logtail.sh" "$n")" || { collection_failed "日志采集失败"; return 1; }
   if echo "$t" | grep -q -- "$pat"; then ok "$d"; CASE_ASSERTS+=("PASS|$d|log|hit|$pat")
   else bad "$d  （日志未命中：$pat）"; CASE_ASSERTS+=("FAIL|$d|log|miss|$pat"); fi
 }
@@ -408,7 +422,7 @@ want() {  # want <用例ID> —— 在 case_begin 之前调用，未选中则完
 apply_dev() { sh_dev "$DEV_DIR/apply.sh" "$@"; }
 ensure_decouple() {
   local vs="${1:-2800}"
-  snap >/dev/null 2>&1
+  snap >/dev/null 2>&1 || return 1
   # 快路径：已是解耦态且 target 正确 → 不重跑 service.sh（单次省 15~20s）
   if [ "${S[skip]:-}" = "no" ] && [ "${S[param_target]:-}" = "$vs" ]; then return 0; fi
   apply_dev decouple "$vs" >/dev/null 2>&1
@@ -419,10 +433,18 @@ apply_target() {
   wait_key param_target "$1" 12
 }
 ensure_factory() {
-  snap >/dev/null 2>&1
+  snap >/dev/null 2>&1 || return 1
   [ "${S[skip]:-}" = "yes" ] && return 0
   apply_dev factory >/dev/null 2>&1
   wait_key skip yes 12
+}
+
+# 每条 T2 都独立执行一次解耦→恢复，单例和 --resume 不依赖 T2.1 的副作用。
+setup_factory_case() {
+  ensure_decouple 2800 || { bad "T2 解耦准备失败"; return 1; }
+  apply_dev factory >/dev/null 2>&1 || { bad "T2 恢复操作失败"; return 1; }
+  wait_key skip yes 12 || { bad "T2 恢复态等待失败"; return 1; }
+  snap
 }
 
 soft_reboot() {
@@ -534,34 +556,34 @@ t_T1_5() { want T1.5 || return 0; case_begin T1.5 "解耦态无残留进程"
 
 #CASE T2.1|「执行」→ skip 创建 + 进恢复模式
 t_T2_1() { want T2.1 || return 0; case_begin T2.1 "执行 → skip 创建"
-  ensure_decouple 2800; snap; local ORIG="${S[adsp_orig]:-?}"
-  apply_dev factory >/dev/null 2>&1; sleep 4; snap
+  setup_factory_case || { case_end; return; }
   A "skip == yes" skip eq yes
   case_end; }
 
 #CASE T2.2|「执行」→ ADSP 回写原厂值
 t_T2_2() { want T2.2 || return 0; case_begin T2.2 "执行 → ADSP = 原厂值"
-  snap; local ORIG="${S[adsp_orig]:-?}"
+  setup_factory_case || { case_end; return; }; local ORIG="${S[adsp_orig]:-?}"
   A "adsp_read = 原厂($ORIG)" adsp_read eq "$ORIG"
   A "adsp_state = 原厂($ORIG)" adsp_state eq "$ORIG"
   case_end; }
 
 #CASE T2.3|「执行」→ uv_target_mv = 原厂值
 t_T2_3() { want T2.3 || return 0; case_begin T2.3 "执行 → uv_target_mv = 原厂值"
-  snap; local ORIG="${S[adsp_orig]:-?}"
+  setup_factory_case || { case_end; return; }; local ORIG="${S[adsp_orig]:-?}"
   A "uv_target_mv = 原厂($ORIG)" param_target eq "$ORIG"
   case_end; }
 
 #CASE T2.4|「执行」→ vbat_uv 立即跟随（v10.17 核心修复，不插拔）
 t_T2_4() { want T2.4 || return 0; case_begin T2.4 "执行 → vbat_uv 立即 = 原厂（不插拔）"
-  snap; local ORIG="${S[adsp_orig]:-?}"
+  setup_factory_case || { case_end; return; }; local ORIG="${S[adsp_orig]:-?}"
   A "vbat_uv = 原厂($ORIG)" vbat_uv eq "$ORIG"
   A "resume=0（已退出恢复模式）" param_resume eq 0
   case_end; }
 
 #CASE T2.5|「执行」→ bind 解绑
 t_T2_5() { want T2.5 || return 0; case_begin T2.5 "执行 → bind 已解绑"
-  snap; A "bind 层数 = 0" bind_layers eq 0
+  setup_factory_case || { case_end; return; }
+  A "bind 层数 = 0" bind_layers eq 0
   case_end; }
 
 #CASE T3.1|skip 无 + 软重启 → 解耦保持|reboot
@@ -873,6 +895,9 @@ report() {
     echo "  \"route_src\": \"${DV[route_src]:-?}\","
     echo "  \"route_evidence\": \"${DV[route_evidence]//\"/}\","
     echo "  \"with_reboot\": $WITH_REBOOT,"
+    echo "  \"no_reboot\": $NO_REBOOT,"
+    echo "  \"tested_zip_sha256\": \"${TESTED_SHA256:-}\","
+    echo "  \"runner_sha256\": \"$RUNNER_SHA256\","
     echo "  \"floor\": $FLOOR,"
     echo "  \"pass\": $PASS, \"fail\": $FAIL, \"skip\": $SKIP,"
     echo "  \"asserts\": ["
@@ -918,19 +943,21 @@ report() {
 }
 
 # ---------------- 主流程 ----------------
-# resume：读取最近一次结果，收集已 PASS 的用例 ID
+# 身份匹配后才载入历史 PASS；旧报告缺少构建/测试脚本指纹时重新运行。
 RESUME_IDS=""
-if [ "$RESUME" = 1 ]; then
-  LAST="$(ls -td "$HERE"/results/*/ 2>/dev/null | head -1)"
-  if [ -n "$LAST" ] && [ -f "$LAST/report.jsonl" ]; then
-    RESUME_IDS="$(sed -n 's/.*"case":"\([^"]*\)".*"result":"PASS".*/\1/p' "$LAST/report.jsonl" | sort -u | tr "\n" " ")"
-    echo "resume：上次结果 $LAST"
-    echo "        已 PASS：$RESUME_IDS"
-  fi
-fi
+RUNNER_SHA256="$(sha256sum "$SELF" "$DEV_DIR"/*.sh "$HERE/host/resume.py" | sha256sum | cut -d' ' -f1)"
+load_resume() {
+  [ "$RESUME" = 1 ] || return 0
+  RESUME_IDS="$(python3 "$HERE/host/resume.py" "$HERE/results" "$OUT" \
+    "$DEV" "${DV[dev_model]:-?}" "${DV[dev_rom]:-?}" "${DV[dev_kernel]:-?}" \
+    "${DV[dev_chgko]:-?}" "$ROUTE" "${TESTED_SHA256:-}" "$RUNNER_SHA256" \
+    "$FLOOR" "$WITH_REBOOT" "$NO_REBOOT")" || { RESUME_IDS=""; warn "历史报告读取失败，全部重跑"; }
+  [ -z "$RESUME_IDS" ] || say "resume：复用同环境、同构建的 PASS：$RESUME_IDS"
+}
 run_case() {
   local id="$1"; shift
-  if [ -n "$RESUME_IDS" ] && echo " $RESUME_IDS " | grep -q " $id "; then
+  if [ "$WITH_DT" != 1 ] || [[ "$id" != TD.* ]]; then want "$id" || return 0; fi
+  if [ -n "$RESUME_IDS" ] && [[ " $RESUME_IDS " == *" $id "* ]]; then
     say ""; say "── $id  （resume：上次已 PASS，跳过）"
     SKIP=$((SKIP+1))
     JSON_ROWS+=("{\"case\":\"$id\",\"name\":\"(resumed)\",\"result\":\"SKIP\",\"assert\":\"resume: 上次已 PASS\"}")
@@ -1009,7 +1036,7 @@ main() {
   fi
 
   # ---- 启动路线判定（决定跑哪一支用例集）----
-  refresh_route
+  refresh_route || { echo "✗ 启动路线采集失败，终止"; exit 2; }
   say "启动路线: $ROUTE（来源 $ROUTE_SRC）"
   [ -n "${DV[route_evidence]:-}" ] && say "  判据: ${DV[route_evidence]}"
   case "$ROUTE" in
@@ -1028,7 +1055,9 @@ main() {
     say "  用例集：late-load 越狱全量分支"
   fi
 
-  # T10 组必须最先跑：T10.3 的「无主动捕获」要在本套用例动过状态之前采样
+  load_resume
+
+  # T10 组最先运行。
   run_case T10.1 t_T10_1; run_case T10.2 t_T10_2; run_case T10.3 t_T10_3; run_case T10.4 t_T10_4
   run_case T0.1 t_T0_1; run_case T0.2 t_T0_2
   run_case T1.1 t_T1_1; run_case T1.2 t_T1_2; run_case T1.3 t_T1_3; run_case T1.4 t_T1_4; run_case T1.5 t_T1_5
@@ -1053,5 +1082,4 @@ main() {
   snap >/dev/null 2>&1 && say "  最终：target=${S[param_target]:-?} vbat_uv=${S[vbat_uv]:-?} adsp=${S[adsp_read]:-?} skip=${S[skip]:-?}"
   report
 }
-main
-
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then main; fi

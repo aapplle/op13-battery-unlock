@@ -5,6 +5,7 @@ MODDIR=${0%/*}
 # 日志函数（stdout + dmesg + 落盘到备份目录）
 [ -f "$MODDIR/log.sh" ] && . "$MODDIR/log.sh"
 command -v uv_log >/dev/null 2>&1 || uv_log() { echo "uv2800: $*"; }
+uv_lock || exit 1
 uv_log_sep "post-fs-data.sh 开始"
 
 # 等待 oplus_chg_v2 加载完成（kprobe 需要它的符号），最多 30 秒
@@ -23,7 +24,12 @@ if lsmod | grep -q "^uv2800"; then
 fi
 
 # 此处必为「未加载」（上方已「已加载则跳过」），无需再先 rmmod
-insmod "$MODDIR/uv2800.ko"
-uv_log "post-fs-data insmod rc=$? (waited ${i}s)"
+if insmod "$MODDIR/uv2800.ko"; then
+    uv_log "post-fs-data insmod 成功 (waited ${i}s)"
+else
+    _load_rc=$?
+    uv_log "post-fs-data insmod 失败 rc=$_load_rc (waited ${i}s)"
+    exit "$_load_rc"
+fi
 # insmod 后立刻抓内核自报的 profile 落盘（dmesg 约 10 分钟就被冲掉）
 uv_log_kver

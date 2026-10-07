@@ -25,24 +25,22 @@ echo "   分支: $BRANCH"
 echo "   目标: $TARGET"
 
 if [ -d "$TARGET/.git" ]; then
-    echo "   目录已存在，执行 fetch 更新 ..."
-    git -C "$TARGET" fetch --depth 1 origin "$BRANCH"
-    git -C "$TARGET" checkout --detach FETCH_HEAD
+    echo "   目录已存在，定位固定提交 ..."
 else
     mkdir -p "$KERNEL_DIR"
-    git clone --depth 1 --branch "$BRANCH" "$REPO_URL" "$TARGET"
+    git init "$TARGET"
+    git -C "$TARGET" remote add origin "$REPO_URL"
 fi
 
-HEAD_SHA="$(git -C "$TARGET" rev-parse HEAD)"
-if [ "$HEAD_SHA" != "$COMMIT" ]; then
-    echo "   分支已前移（当前 $HEAD_SHA），尝试检出固定 commit $COMMIT ..."
-    if git -C "$TARGET" fetch --depth 1 origin "$COMMIT" 2>/dev/null; then
-        git -C "$TARGET" checkout --detach FETCH_HEAD
-        HEAD_SHA="$(git -C "$TARGET" rev-parse HEAD)"
-    else
-        echo "   ⚠️ 无法按 commit 检出，保留分支最新（$HEAD_SHA）"
-    fi
+if ! git -C "$TARGET" cat-file -e "$COMMIT^{commit}" 2>/dev/null; then
+    git -C "$TARGET" fetch --depth 1 origin "$COMMIT" || {
+        echo "✗ 固定提交获取失败，未就绪：$COMMIT" >&2
+        exit 1
+    }
 fi
+git -C "$TARGET" checkout --detach "$COMMIT"
+HEAD_SHA="$(git -C "$TARGET" rev-parse HEAD)"
+[ "$HEAD_SHA" = "$COMMIT" ] || { echo "✗ HEAD 与固定提交不一致：$HEAD_SHA" >&2; exit 1; }
 
 echo "   已就绪: $TARGET"
 echo "   HEAD:   $HEAD_SHA"

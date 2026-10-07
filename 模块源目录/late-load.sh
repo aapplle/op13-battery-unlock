@@ -25,12 +25,18 @@ MODDIR=${0%/*}
 #   排查时无法区分"没跑"和"跑了但失败"。
 [ -f "$MODDIR/log.sh" ] && . "$MODDIR/log.sh"
 command -v uv_log >/dev/null 2>&1 || uv_log() { echo "uv2800: $*"; }
+uv_lock || exit 1
 
 if lsmod | grep -q "^uv2800"; then
     uv_log "late-load.sh 模块已加载，跳过 insmod（重复执行场景）"
 else
-    insmod "$MODDIR/uv2800.ko"
-    uv_log "late-load.sh insmod rc=$?"
+    if insmod "$MODDIR/uv2800.ko"; then
+        uv_log "late-load.sh insmod 成功"
+    else
+        _load_rc=$?
+        uv_log "late-load.sh insmod 失败 rc=$_load_rc"
+        exit "$_load_rc"
+    fi
     # 抓内核自报的 profile 落盘（dmesg 约 10 分钟就被冲掉）
     command -v uv_log_kver >/dev/null 2>&1 && uv_log_kver
 fi

@@ -53,15 +53,12 @@ make ARCH=arm64 LLVM=1 olddefconfig
 make ARCH=arm64 LLVM=1 modules_prepare
 cp "$KB/Module.symvers" "$KT/Module.symvers"
 
-# 2) 编译模块（源码在 内核源码/）
-make ARCH=arm64 LLVM=1 M="$ROOT/内核源码" modules
-llvm-strip --strip-debug "$ROOT/内核源码/uv2800.ko"
-
-# 3) 打包发布 zip（从 模块源目录/ 构建）
-cd "$ROOT/模块源目录" && zip -q -r "$ROOT/一加13解容-v$(grep '^version=' module.prop | cut -d= -f2).zip" .
+# 2) 在隔离目录编译、校验 ABI、同步 .ko/构建清单，再打包
+cd "$ROOT"
+bash 自动化测试矩阵/build.sh
 ```
 
-> 也可以直接用 `自动化测试矩阵/build.sh`（它封装了 2)+3) 两步）。
+> 构建脚本生成 `模块源目录/uv2800.build.json`，记录实际源码、配置、符号表、工具链与二进制摘要。发布工作流要求清单匹配当前源码，禁止把旧 `.ko` 当作新源码制品直接打包。
 
 **产物核验基线**：`.gnu.linkonce.this_module` 节区大小应严格为 `0x600`（1536 字节）。
 

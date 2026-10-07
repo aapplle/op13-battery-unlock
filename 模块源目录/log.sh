@@ -13,6 +13,63 @@
 UV_BK=/data/adb/uv2800_backup
 UV_LOG="$UV_BK/uv2800.log"
 
+# 固定 inode + 继承的文件描述符：进程退出后内核自动释放，不删除锁文件。
+# BusyBox/Toybox 的 flock 不一定支持 -w，统一用 -n 做有界等待。
+uv_lock() {
+    mkdir -p "$UV_BK" || return 1
+    exec 9>"$UV_BK/operation.lock" || return 1
+    UV_FLOCK=""
+    if command -v flock >/dev/null 2>&1; then
+        UV_FLOCK=flock
+    else
+        for _ul_bin in /data/adb/ksu/bin/busybox /data/adb/magisk/busybox busybox toybox; do
+            command -v "$_ul_bin" >/dev/null 2>&1 || continue
+            if "$_ul_bin" --list 2>/dev/null | grep -qx flock ||
+               "$_ul_bin" 2>/dev/null | tr ' ,\t' '\n' | grep -qx flock; then
+                UV_FLOCK=$_ul_bin
+                break
+            fi
+        done
+    fi
+    if [ -z "$UV_FLOCK" ]; then
+        uv_log "错误：找不到 flock，停止操作（需要 KernelSU BusyBox 或 Toybox flock）"
+        return 1
+    fi
+    _ul_wait=0
+    while [ "$_ul_wait" -lt 90 ]; do
+        if [ "$UV_FLOCK" = flock ]; then
+            flock -n 9 2>/dev/null && return 0
+        else
+            "$UV_FLOCK" flock -n 9 2>/dev/null && return 0
+        fi
+        sleep 1
+        _ul_wait=$((_ul_wait+1))
+    done
+    uv_log "错误：等待其它模块操作结束超时（90s），本次未执行"
+    return 1
+}
+
+# 成功仅指本次真实读取成功；历史 adsp_state 不是硬件状态的证明。
+uv_read_adsp() {
+    _ur_p=${1:-/sys/module/uv2800/parameters}
+    echo 1 > "$_ur_p/adsp_read" 2>/dev/null || return 1
+    _ur_v=$(cat "$_ur_p/adsp_read" 2>/dev/null) || return 1
+    case "$_ur_v" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$_ur_v" -ge 2000 ] 2>/dev/null && [ "$_ur_v" -le 5000 ] 2>/dev/null || return 1
+    echo "$_ur_v"
+}
+
+uv_set_targets() {
+    _ut_shutdown=$1; _ut_adsp=$2
+    _ut_p=${3:-/sys/module/uv2800/parameters}
+    echo "$_ut_shutdown" > "$_ut_p/uv_target_mv" 2>/dev/null || return 1
+    echo "$_ut_adsp" > "$_ut_p/uv_adsp_mv" 2>/dev/null || return 1
+    echo 1 > "$_ut_p/resume" 2>/dev/null || return 1
+    [ "$(cat "$_ut_p/uv_target_mv" 2>/dev/null)" = "$_ut_shutdown" ] &&
+        [ "$(cat "$_ut_p/uv_adsp_mv" 2>/dev/null)" = "$_ut_adsp" ] &&
+        [ "$(cat "$_ut_p/resume" 2>/dev/null)" = 0 ]
+}
+
 uv_log() {
     _m="uv2800: $*"
     echo "$_m"

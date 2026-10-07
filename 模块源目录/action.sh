@@ -30,20 +30,19 @@ MODDIR=${0%/*}
 [ -f "$MODDIR/log.sh" ] && . "$MODDIR/log.sh"
 command -v uv_log >/dev/null 2>&1 || uv_log() { echo "uv2800: $*"; }
 
-# 查询模块最后一次【成功写入】的电量计终止电压记录（$BK/adsp_state）。
-# 若记录显示已经是原值，就无需 uv_dev 即可跳过回写。
-adsp_known() {
-    _k=$(cat "$BK/adsp_state" 2>/dev/null | tr -d "[:space:]")
-    case "$_k" in ''|*[!0-9]*) return 1 ;; esac
-    [ "$_k" = "$1" ] && return 0
-    return 1
-}
+uv_lock || exit 1
 uv_log_sep "action.sh 恢复原值 开始"
 
 PARAM=/sys/module/uv2800/parameters/adsp_write
 VBAT=/sys/class/oplus_chg/battery/vbat_uv
 VOLT_NOW=/sys/class/power_supply/battery/voltage_now
 BK=/data/adb/uv2800_backup
+P=${PARAM%/*}
+
+restore_fail() {
+    uv_log "恢复尚未完成：$*；保留 skip / restore_pending，请重试恢复后再卸载"
+    exit 1
+}
 
 echo "=========================================="
 echo "  uv2800  恢复原值（写回电量计 ADSP）"
@@ -88,9 +87,11 @@ if [ -f "$ORIG" ]; then
     case "$T" in ''|*[!0-9]*) T="" ;; esac
     if [ -n "$T" ] && [ "$T" -lt 3000 ] 2>/dev/null; then
         # 读取侧静态判据：<3000 视为污染（DT 表最低档 = 3000），隔离并走厂商标准重算
-        echo "- ⚠️ adsp_orig.txt=$T mV 疑似污染值（DT 表最低档 3000），已隔离，改用厂商标准重算"
-        uv_log "adsp_orig.txt=$T 疑似污染，已隔离为 adsp_orig.bad"
-        mv -f "$ORIG" "$BK/adsp_orig.bad" 2>/dev/null
+        echo "- ⚠️ adsp_orig.txt=$T mV 疑似污染值（DT 表最低档 3000），改用厂商标准重算"
+        uv_log "adsp_orig.txt=$T 疑似污染${UV2800_DRYRUN:+（试运行时保留备份）}"
+        if [ "$UV2800_DRYRUN" != "1" ]; then
+            mv -f "$ORIG" "$BK/adsp_orig.bad" || exit 1
+        fi
         T=""
     fi
     if [ -n "$T" ] && [ "$T" -ge 3000 ] && [ "$T" -le 5000 ]; then
@@ -120,127 +121,38 @@ echo "- 算出的原值 : ${TARGET} mV"
 echo ""
 
 if [ "$UV2800_DRYRUN" = "1" ]; then
-    echo "【试运行】目标值 ${TARGET} mV 计算完成，未执行任何写入。"
+    echo "【试运行】目标值 ${TARGET} mV 计算完成，未写设备或修改原值备份。"
     exit 0
 fi
 
-# --- 4) 是否需要真正回写？-------------------------------------------------
-# 读写 ADSP 必须用 uv_dev（电量计设备指针）。它由
-#   oplus_fg_get_deep_term_volt 的入口 kprobe 在驱动 vote（充电状态变化）时捕获；
-#   还可由 deep_dischg 入口补捕获（uv_capture_dev，见下方主动触发）。
-#   硬重启 + 越狱后若两条路径都没走到，uv_dev 就是 NULL -> 读不了也写不了 ADSP。
-#   但若 $BK/adsp_state 记录显示模块上次写入的就是原值（模块卸载时会清掉该记录），
-#   本次就【不需要】回写 —— 直接跳过，继续后面的解绑与策略恢复。
-#   ⚠️ 这与 vbat_uv 无关：vbat_uv 是 hook 的即时镜像（实测逐字跟随 uv_target_mv），
-#   不需要 vote/插拔 —— 若它不跟随，先查 hook 是否被旁路。
-echo "- 当前 vbat_uv: $(cat $VBAT 2>/dev/null) mV"
-SKIP_WRITE=0
-if adsp_known "$TARGET"; then
-    SKIP_WRITE=1
-    echo "- 电量计记录 : adsp_state 显示已是原值 ${TARGET} mV -> 无需回写"
-    uv_log "adsp_state 记录显示电量计已是原值 ${TARGET} mV，本次跳过回写"
+# 恢复操作与 service / uninstall 共用锁。先记录意图，再改参数/硬件。
+mkdir -p "$BK" && touch "$BK/skip" "$BK/restore_pending" || restore_fail "写入恢复标记失败"
+rm -f "$BK/adsp_state" || restore_fail "清理旧写入记录失败"
+if [ ! -f "$ORIG" ]; then
+    echo "$TARGET" > "$ORIG" || restore_fail "保存原厂值失败"
 fi
 
-# 不限定越狱模式：任何模式下都先确认 uv_dev 已捕获 ——
-#   ① 先主动触发捕获（写 deep_dischg_counts 同值，实测 1 秒内就绪）；
-#   ② 仍失败则【中止】回写并提示重启（不给插拔提示，也不做后台补写）。
-# 超时一律【中止】而非报假成功；写入后还会读回校验并记录 adsp_state。
-if [ "$SKIP_WRITE" = "0" ]; then
-    PREAD=/sys/module/uv2800/parameters/adsp_read
-    echo 1 > "$PREAD" 2>/dev/null
-    READY=$(cat "$PREAD" 2>/dev/null)
-    # 未捕获时先主动触发一次（写 deep_dischg_counts 同值）
-    if [ -z "$READY" ] || [ "$READY" -le 2000 ] 2>/dev/null; then
-        echo ""
-        echo "- 尚未捕获【电量计设备指针】，先尝试主动触发..."
-        uv_capture_dev
-        sleep 1
-        echo 1 > "$PREAD" 2>/dev/null
-        READY=$(cat "$PREAD" 2>/dev/null)
-        if [ -n "$READY" ] && [ "$READY" -gt 2000 ] 2>/dev/null; then
-            echo "-    ✅ 已就绪（电量计当前值 $READY mV）"
-        fi
-    fi
-    if [ -z "$READY" ] || [ "$READY" -le 2000 ] 2>/dev/null; then
-        # 自动捕获失败（该驱动的 deep_dischg 入口不可用），中止回写
-        echo ""
-        echo "  ✗✗ 无法捕获电量计设备指针（老版本驱动？），已【中止】回写 ✗✗"
-        echo "  请尝试重启手机后再点「执行」。"
-        exit 1
-    fi
-fi
-# --- 3.5) ★ 先打 skip 标记 ------------------------------------------
-# 【为什么必须在回写之前】service.sh 的解耦分支在探测到 uv_dev 就绪后
-# 会把 ADSP 写回解耦目标。若 skip 在回写【之后】才创建，
-# 那次写入会把刚恢复的原值覆盖掉（实测：回写后 1 秒被撤销）。
-# 这是本脚本唯一的写入窗口；service.sh 的探测循环见到 skip 会立即停手。
-mkdir -p "$BK" && touch "$BK/skip"
-echo "- 已打上 skip 标记（service.sh 的解耦循环会立即停手）"
-echo ""
-
-# 无论是否需要回写，都确保 adsp_orig.txt 存在（可能被隔离为 .bad 后缺失）
-if [ ! -f "$BK/adsp_orig.txt" ]; then
-    echo "$TARGET" > "$BK/adsp_orig.txt"
-    uv_log "已重建 adsp_orig.txt = ${TARGET} mV（原文件缺失/被隔离）"
-fi
-
-if [ "$SKIP_WRITE" = "1" ]; then
-    echo "- 跳过回写（记录显示已是原值）"
-else
-    echo "- 写回中 ..."
-    echo "$TARGET" > "$PARAM"
-    echo "- 写入返回   : $?"
-    # 读回校验，一致才记录 adsp_state（供 uv_dev 未捕获时判定）
-    _rb=$(echo 1 > /sys/module/uv2800/parameters/adsp_read 2>/dev/null; cat /sys/module/uv2800/parameters/adsp_read 2>/dev/null)
-    echo "- 读回校验   : ${_rb} mV"
-    if [ "$_rb" = "$TARGET" ]; then
-        echo "$TARGET" > "$BK/adsp_state"
-    else
-        uv_log "⚠️ 回写后读回 ${_rb} mV != 目标 ${TARGET} mV，未记录 adsp_state"
-    fi
-fi
-
-# ★ 把 hook 强制值设为原值，并【退出恢复模式】让它生效。
-#   hook 返回运行时参数 uv_target_mv（默认 2800）；只回写 ADSP 而不改它，
-#   hook 仍会把 vbat_uv 强制成 2800，等于没恢复。
-#   光改 uv_target_mv 还不够 —— 必须确保 hook 处于生效状态：
-#   adsp_write 走 uv_self_write 穿透 hook，回写本身不需要旁路；
-#   显式写 resume=1 后 hook 重新生效，vbat_uv 立即被强制成原值 ——
-#   实测：hook 生效时 vbat_uv 是 uv_target_mv 的【即时镜像】，改 3000/3100/3250
-#   逐字跟随，零延迟、无需任何 vote。
-#   （若 vbat_uv 不跟随，唯一原因是 hook 被旁路，不是"需要等 vote/插拔"。）
-_P=$(dirname "$PARAM")
-if [ -w "$_P/uv_target_mv" ]; then
-    echo "$TARGET" > "$_P/uv_target_mv"
-    echo "$TARGET" > "$_P/uv_adsp_mv" 2>/dev/null
-    echo 1 > "$_P/resume" 2>/dev/null
+# 两个 hook 目标必须一起恢复，设备指针是否就绪不影响参数同步。
+uv_set_targets "$TARGET" "$TARGET" "$P" || restore_fail "hook 参数设置或校验失败"
+READY=$(uv_read_adsp "$P") || READY=""
+if [ -z "$READY" ]; then
+    echo "- 尝试捕获电量计设备指针..."
+    uv_capture_dev
     sleep 1
-    echo "- hook 强制值 : $TARGET mV（uv_target_mv），resume=$(cat "$_P/resume" 2>/dev/null)，vbat_uv=$(cat "$VBAT" 2>/dev/null)"
+    READY=$(uv_read_adsp "$P") || READY=""
 fi
-
-sleep 2
-
-echo ""
-echo "- 内核日志："
-dmesg 2>/dev/null | grep "uv2800:" | grep -v "Modules linked" | tail -4
-
-# --- 4.5) 兜底：确认 vbat_uv 已是原值 ---------------------------------------
-# 【归因】vbat_uv 不是"驱动缓存"，不需要 vote/插拔刷新：只要 hook 生效
-#   （uv_bypass=0），它就是 uv_target_mv 的【即时镜像】—— 改
-#   uv_target_mv=3000/3100/3250，vbat_uv 逐字跟随，零延迟。
-#   vbat_uv 卡住不跟随，唯一原因是 hook 被旁路（uv_bypass=1）；
-#   上方写 resume=1 即恢复，「执行」流程自身不旁路 hook
-#   （adsp_write 走 uv_self_write 穿透）。
-# 本段保留为【兜底】：万一 hook 参数不可写（老内核）或读回异常，仍给出提示。
+[ -n "$READY" ] || restore_fail "电量计读取失败（接口不可用、尚未捕获指针或驱动返回错误）"
+if [ "$READY" != "$TARGET" ]; then
+    echo "$TARGET" > "$PARAM" || restore_fail "电量计回写失败"
+fi
+# 即使第一次读取已相等，也进行最终实时读取；不采用持久缓存跳过验证。
+_rb=$(uv_read_adsp "$P") || restore_fail "回写后读取失败"
+[ "$_rb" = "$TARGET" ] || restore_fail "读回 ${_rb} mV 与目标 ${TARGET} mV 不一致"
+echo "$TARGET" > "$BK/adsp_state" || restore_fail "保存验证结果失败"
 CURV=$(cat "$VBAT" 2>/dev/null | tr -d "[:space:]")
-if [ "$CURV" != "$TARGET" ]; then
-    echo ""
-    echo "- ⚠️ hook 未生效（vbat_uv 仍为 $CURV mV，期望 $TARGET mV）"
-    echo "-    这不影响 ADSP 回写结果；重启后 vbat_uv 会跟随 uv_target_mv。"
-    okv=0
-else
-    okv=skip        # 回写后已是目标值
-fi
+[ "$CURV" = "$TARGET" ] || restore_fail "关机电压 ${CURV:-未知} mV 未跟随 ${TARGET} mV"
+okv=skip
+echo "- 已实时验证：ADSP / 关机电压均为 ${TARGET} mV"
 
 # --- 5) 同时恢复「禁止超级省电」设备策略 ---------------------
 XML=/data/system/oplus_devicepolicy_data_customize.xml
@@ -248,20 +160,20 @@ KEY=oplus_diable_super_power_saving_mode
 
 echo ""
 echo "- 恢复设备策略（超级省电）..."
-su 1000 -c "service call oplusdevicepolicy 1 s16 $KEY s16 false i32 1" >/dev/null 2>&1
+su 1000 -c "service call oplusdevicepolicy 1 s16 $KEY s16 false i32 1" >/dev/null 2>&1 || restore_fail "设备策略接口调用失败"
 if [ -f "$BK/orig_state" ]; then
     if [ "$(cat "$BK/orig_state" 2>/dev/null)" = "existed" ]; then
         if [ -f "$BK/devicepolicy_orig.xml" ]; then
-            cp -f "$BK/devicepolicy_orig.xml" "$XML"
+            cp -f "$BK/devicepolicy_orig.xml" "$XML" || restore_fail "恢复设备策略备份失败"
             chown system:system "$XML" 2>/dev/null
             chmod 600 "$XML" 2>/dev/null
         else
             # 原文件存在但备份丢失 → 不动文件，报警
             echo "- ⚠️ 设备策略备份丢失（orig_state=existed 但 devicepolicy_orig.xml 不存在），保留当前文件"
-            uv_log "⚠️ 设备策略备份丢失，保留当前文件"
+            restore_fail "设备策略备份丢失，保留当前文件"
         fi
     else
-        rm -f "$XML"
+        rm -f "$XML" || restore_fail "移除设备策略文件失败"
     fi
 fi
 # 打上 skip 标记：以后开机不再重新应用设备策略
@@ -281,6 +193,7 @@ fi
 
 echo ""
 echo "=========================================="
+rm -f "$BK/restore_pending" || restore_fail "清理待恢复标记失败"
 echo "  回写完成！"
 echo ""
 echo "  已同时完成："

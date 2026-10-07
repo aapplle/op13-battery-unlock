@@ -16,11 +16,13 @@ MODDIR=${0%/*}
 # 日志函数（stdout + dmesg + 落盘到备份目录），见 log.sh
 [ -f "$MODDIR/log.sh" ] && . "$MODDIR/log.sh"
 command -v uv_log >/dev/null 2>&1 || uv_log() { echo "uv2800: $*"; }
+uv_lock || exit 1
 uv_log_sep "uninstall.sh 卸载 开始"
 
 BK=/data/adb/uv2800_backup
 XML=/data/system/oplus_devicepolicy_data_customize.xml
 KEY=oplus_diable_super_power_saving_mode
+_status=0
 
 echo "- uv2800 卸载"
 
@@ -40,17 +42,22 @@ if [ -d "$P" ]; then
         _orig=$(uv_dt_orig 2>/dev/null)
     fi
     if [ -n "$_orig" ] && [ "$_orig" -ge 3000 ] 2>/dev/null; then
-        echo "$_orig" > "$P/uv_target_mv" 2>/dev/null
-        echo "$_orig" > "$P/uv_adsp_mv" 2>/dev/null
-        echo 1 > "$P/resume" 2>/dev/null
-        sleep 1
-        echo "- 已把 hook 强制值设为原厂 ${_orig} mV（vbat_uv=$(cat /sys/class/oplus_chg/battery/vbat_uv 2>/dev/null)）"
-        uv_log "卸载前 hook 强制值设为原厂 ${_orig} mV"
+        if uv_set_targets "$_orig" "$_orig" "$P"; then
+            sleep 1
+            echo "- 已把 hook 强制值设为原厂 ${_orig} mV（vbat_uv=$(cat /sys/class/oplus_chg/battery/vbat_uv 2>/dev/null)）"
+            uv_log "卸载前 hook 强制值设为原厂 ${_orig} mV"
+        else
+            uv_log "错误：卸载前 hook 参数校验失败"
+            _status=1
+        fi
+    else
+        uv_log "错误：卸载前原厂值不可用，保留备份以便恢复"
+        _status=1
     fi
 fi
 
 # 不 rmmod，用 disable 标记让 KernelSU 下次不加载
-touch "$MODDIR/disable"
+touch "$MODDIR/disable" || exit 1
 echo "- 模块已标记为禁用（hook 保持生效，vbat_uv 维持原厂值直到下次重启）"
 uv_log "模块已禁用（未 rmmod，hook 保持生效）"
 
@@ -77,16 +84,17 @@ fi
 if [ -f "$BK/orig_state" ]; then
     if [ "$(cat "$BK/orig_state" 2>/dev/null)" = "existed" ]; then
         if [ -f "$BK/devicepolicy_orig.xml" ]; then
-            cp -f "$BK/devicepolicy_orig.xml" "$XML"
+            cp -f "$BK/devicepolicy_orig.xml" "$XML" || _status=1
             chown system:system "$XML" 2>/dev/null
             chmod 600 "$XML" 2>/dev/null
             echo "- 已恢复设备策略原文件（重启后超级省电功能恢复）"
         else
             echo "- ⚠️ 设备策略备份丢失（orig_state=existed 但 devicepolicy_orig.xml 不存在），保留当前文件"
             uv_log "⚠️ 设备策略备份丢失，保留当前文件"
+            _status=1
         fi
     else
-        rm -f "$XML"
+        rm -f "$XML" || _status=1
         echo "- 原文件本不存在，已删除设备策略文件"
     fi
 else
@@ -95,6 +103,11 @@ fi
 
 # 兜底：若服务已启动（手动执行本脚本的情况），再调一次 setter
 su 1000 -c "service call oplusdevicepolicy 1 s16 $KEY s16 false i32 1" >/dev/null 2>&1
+
+if [ "$_status" != 0 ]; then
+    uv_log "卸载恢复存在失败，保留备份和待恢复记录"
+    exit 1
+fi
 
 # --- 保留 adsp_orig.txt（记录电量计原值，供重新安装或手动恢复参考）---
 if [ -f "$BK/adsp_orig.txt" ]; then
