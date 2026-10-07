@@ -44,7 +44,7 @@ jobs:
       - name: 宿主回归（无需手机）
         run: python3 -m unittest discover -s 自动化测试矩阵/host -p 'test_*.py' -v 2>&1 | tee ci-logs/host-tests.log
 
-      - name: 拉取固定提交的内核源码
+      - name: 拉取固定提交的内核和必要 OEM 子树
         run: bash fetch-kernel.sh 2>&1 | tee ci-logs/fetch-kernel.log
 
       - name: 配置内核并准备外部模块构建
@@ -86,6 +86,7 @@ jobs:
             ci-logs/
             编译用内核树/android_kernel_oneplus_sm8750/.config
             编译用内核树/android_kernel_oneplus_sm8750/config.diff
+            编译用内核树/android_kernel_oneplus_sm8750/vendor-dependencies.json
           include-hidden-files: true
           if-no-files-found: ignore
 

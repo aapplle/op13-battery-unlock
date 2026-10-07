@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import runpy
 import struct
 import subprocess
 import sys
@@ -11,8 +12,10 @@ from pathlib import Path
 KERNEL_COMMIT = "6028f47faddaa27700f8dd3a1d83906ea8f27170"
 VERMAGIC = "6.6.118-4k-g6028f47fadda SMP preempt mod_unload modversions aarch64"
 SOURCES = ("内核源码/uv2800.c", "内核源码/Makefile")
-INPUTS = SOURCES + ("编译前置/device_config", "编译前置/Module.symvers")
+INPUTS = SOURCES + ("编译前置/device_config", "编译前置/Module.symvers",
+                    "自动化测试矩阵/host/kernel_dependencies.py")
 MANIFEST = "模块源目录/uv2800.build.json"
+dependencies = runpy.run_path(str(Path(__file__).with_name("kernel_dependencies.py")))
 
 
 def sha256(path):
@@ -78,13 +81,14 @@ def write_manifest(root, module, source_dir, kernel, compiler, output):
     if any(inputs[name] != sha256(root / name) for name in INPUTS):
         raise ValueError("source changed during the build; rebuild before publishing")
     manifest = {
-        "schema": 1,
+        "schema": 2,
         "inputs_sha256": inputs,
         "module_sha256": sha256(module),
         "abi": check_abi(module),
         "kernel": {"commit": commit, "config_sha256": sha256(kernel / ".config"),
                    "symvers_sha256": sha256(kernel / "Module.symvers")},
         "compiler": compiler,
+        "vendor": dependencies["vendor_manifest"](kernel),
     }
     Path(output).write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
                             encoding="utf-8", newline="\n")
@@ -97,7 +101,7 @@ def verify_manifest(root, module=None, manifest=None):
     if not manifest.is_file():
         raise ValueError("missing uv2800.build.json; rebuild using 自动化测试矩阵/build.sh before packaging")
     record = json.loads(manifest.read_text(encoding="utf-8"))
-    if not isinstance(record, dict) or record.get("schema") != 1:
+    if not isinstance(record, dict) or record.get("schema") != 2:
         raise ValueError("unsupported build manifest schema")
     expected = {name: sha256(root / name) for name in INPUTS}
     if record.get("inputs_sha256") != expected:
@@ -106,6 +110,12 @@ def verify_manifest(root, module=None, manifest=None):
         raise ValueError("uv2800.ko hash differs from its build manifest")
     if record.get("kernel", {}).get("commit") != KERNEL_COMMIT:
         raise ValueError("build manifest kernel commit mismatch")
+    vendor = record.get("vendor", {})
+    if vendor.get("commit") != dependencies["VENDOR_COMMIT"] or vendor.get("repository") != dependencies["VENDOR_URL"]:
+        raise ValueError("build manifest vendor dependency mismatch")
+    links = vendor.get("links", {})
+    if not links or vendor.get("links_sha256") != hashlib.sha256(json.dumps(links, sort_keys=True).encode()).hexdigest():
+        raise ValueError("build manifest vendor link mapping mismatch")
     if record.get("abi") != check_abi(module):
         raise ValueError("build manifest ABI mismatch")
     check_bundle_text(root)

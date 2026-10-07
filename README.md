@@ -141,7 +141,7 @@ ADSP 终止电压 = 关机电压 − max(0, 3060 − 关机电压)
 需要：Linux 环境、LLVM 18 工具链、Python 3、约 3 GB 空闲磁盘。GitHub Actions 使用 Ubuntu 24.04；其完整 apt 依赖见 [构建工作流](.github/workflows/release.yml)。手机侧的状态操作需要可用的 `flock`（支持系统命令及 KernelSU/Magisk BusyBox、Toybox）；缺少锁后端时脚本会停止操作并记录原因。
 
 ```sh
-# 1) 拉取上游内核源码树（约 1.6 GB）
+# 1) 拉取固定内核及原始链接需要的 OEM 子树（按需稀疏检出）
 ./fetch-kernel.sh
 
 # 2) 写入 device_config，运行 olddefconfig/modules_prepare，核验配置并复制 Module.symvers

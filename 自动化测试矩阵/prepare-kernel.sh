@@ -37,6 +37,7 @@ prepare_kernel() {
     release="$(python3 -c 'import runpy,sys; print(runpy.run_path(sys.argv[1])["VERMAGIC"].split()[0])' "$metadata")"
     [ "$(git -C "$kernel" rev-parse HEAD)" = "$pin" ] || { echo "✗ Wrong kernel commit; expected $pin" >&2; return 1; }
     git -C "$kernel" diff --quiet HEAD -- || { echo "✗ Kernel tracked sources differ from pinned HEAD" >&2; return 1; }
+    python3 "$PREPARE_DIR/host/kernel_dependencies.py" verify --kernel "$kernel"
 
     cp "$PREPARE_ROOT/编译前置/device_config" "$kernel/.config"
     make -C "$kernel" ARCH=arm64 LLVM=1 olddefconfig

@@ -27,6 +27,7 @@ def load_module(name):
 
 metadata = load_module("build_metadata")
 resume = load_module("resume")
+dependencies = load_module("kernel_dependencies")
 
 
 def bash_path():
@@ -245,8 +246,12 @@ class ArtifactTests(unittest.TestCase):
         kernel.mkdir()
         (kernel / ".config").write_text("CONFIG_MODULES=y\n", encoding="utf-8")
         shutil.copyfile(self.root / "编译前置/Module.symvers", kernel / "Module.symvers")
+        links = {"kernel/oplus_cpu": "vendor/oplus/kernel/cpu"}
+        vendor = {"repository": dependencies.VENDOR_URL, "commit": dependencies.VENDOR_COMMIT,
+                  "links": links, "links_sha256": metadata.hashlib.sha256(json.dumps(links, sort_keys=True).encode()).hexdigest()}
         with mock.patch.object(metadata.subprocess, "check_output", return_value=metadata.KERNEL_COMMIT), \
-             mock.patch.object(metadata.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)):
+             mock.patch.object(metadata.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)), \
+             mock.patch.dict(metadata.dependencies, {"vendor_manifest": lambda kernel: vendor}):
             metadata.write_manifest(self.root, self.module, self.root / "内核源码",
                                     kernel, "fixture compiler", self.manifest)
 
@@ -296,6 +301,44 @@ class ArtifactTests(unittest.TestCase):
         (self.root / "模块源目录/service.sh").write_bytes(b"#!/system/bin/sh\r\necho test\r\n")
         with self.assertRaisesRegex(ValueError, "CRLF"):
             metadata.verify_manifest(self.root)
+
+    def test_changed_vendor_revision_is_rejected(self):
+        self.create_manifest()
+        record = json.loads(self.manifest.read_text(encoding="utf-8"))
+        record["vendor"]["commit"] = "0" * 40
+        self.manifest.write_text(json.dumps(record), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "vendor dependency mismatch"):
+            metadata.verify_manifest(self.root)
+
+
+class DependencyTests(unittest.TestCase):
+    def test_original_oem_link_layout_is_preserved(self):
+        kernel = ROOT / "编译用内核树" / "android_kernel_oneplus_sm8750"
+        self.assertEqual(dependencies.vendor_target(kernel, "kernel/oplus_cpu", "../../../vendor/oplus/kernel/cpu"),
+                         "vendor/oplus/kernel/cpu")
+        self.assertEqual(dependencies.vendor_target(kernel, "drivers/soc/oplus/trackpoint",
+                         "../../../../../vendor/qcom/opensource/display-drivers/oplus/common/trackpoint"),
+                         "vendor/qcom/opensource/display-drivers/oplus/common/trackpoint")
+        self.assertIsNone(dependencies.vendor_target(kernel, "kernel/sched/walt/oem_sched", "../../oplus_cpu/misc/sched_assist"))
+
+    def test_kconfig_preflight_reports_all_missing_sources(self):
+        with tempfile.TemporaryDirectory(prefix="uv-kconfig-") as directory:
+            kernel = Path(directory)
+            (kernel / "Kconfig").write_text('source "first/Kconfig"\nif DISABLED\nsource "second/Kconfig"\nendif\n', encoding="utf-8")
+            with self.assertRaises(ValueError) as error:
+                dependencies.check_kconfig_sources(kernel)
+            self.assertIn("first/Kconfig", str(error.exception))
+            self.assertIn("second/Kconfig", str(error.exception))
+
+    def test_kconfig_preflight_follows_transitive_oem_source(self):
+        with tempfile.TemporaryDirectory(prefix="uv-kconfig-") as directory:
+            kernel = Path(directory)
+            cpu = kernel / "kernel/oplus_cpu"
+            cpu.mkdir(parents=True)
+            (kernel / "Kconfig").write_text('source "$(KCONFIG_EXT_PREFIX)kernel/oplus_cpu/Kconfig"\n', encoding="utf-8")
+            (cpu / "Kconfig").write_text('source "kernel/oplus_cpu/child"\n', encoding="utf-8")
+            (cpu / "child").write_text('config OPLUS_FEATURE_CPU\n  bool "CPU"\n', encoding="utf-8")
+            self.assertEqual(dependencies.check_kconfig_sources(kernel), 3)
 
 
 if __name__ == "__main__":

@@ -42,6 +42,10 @@ git -C "$TARGET" checkout --detach "$COMMIT"
 HEAD_SHA="$(git -C "$TARGET" rev-parse HEAD)"
 [ "$HEAD_SHA" = "$COMMIT" ] || { echo "✗ HEAD 与固定提交不一致：$HEAD_SHA" >&2; exit 1; }
 
+# 原内核链接遵循 kernel_platform/<kernel> + vendor 布局。
+# 只检出这些真实链接引用的 OEM 子树，保留内核中的原始链接字节。
+python3 "$ROOT_DIR/自动化测试矩阵/host/kernel_dependencies.py" fetch --kernel "$TARGET"
+
 echo "   已就绪: $TARGET"
 echo "   HEAD:   $HEAD_SHA"
 echo "   版本:   $(grep -m1 '^VERSION' "$TARGET/Makefile") $(grep -m1 '^PATCHLEVEL' "$TARGET/Makefile") $(grep -m1 '^SUBLEVEL' "$TARGET/Makefile")"
