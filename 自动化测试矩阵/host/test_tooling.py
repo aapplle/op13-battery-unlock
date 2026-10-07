@@ -248,6 +248,7 @@ class ArtifactTests(unittest.TestCase):
         shutil.copyfile(self.root / "编译前置/Module.symvers", kernel / "Module.symvers")
         links = {"kernel/oplus_cpu": "vendor/oplus/kernel/cpu"}
         vendor = {"repository": dependencies.VENDOR_URL, "commit": dependencies.VENDOR_COMMIT,
+                  "extra_links": dependencies.EXTRA_LINKS,
                   "links": links, "links_sha256": metadata.hashlib.sha256(json.dumps(links, sort_keys=True).encode()).hexdigest()}
         with mock.patch.object(metadata.subprocess, "check_output", return_value=metadata.KERNEL_COMMIT), \
              mock.patch.object(metadata.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)), \
@@ -312,6 +313,30 @@ class ArtifactTests(unittest.TestCase):
 
 
 class DependencyTests(unittest.TestCase):
+    def test_storage_alias_reaches_real_sibling_without_replacing_storage(self):
+        with tempfile.TemporaryDirectory(prefix="uv-storage-") as directory:
+            root = Path(directory)
+            kernel, vendor = root / "kernel", root / "vendor-repository"
+            original = vendor / "vendor/oplus/kernel/storage/storage_feature_in_module"
+            expected = vendor / "vendor/oplus/kernel/storage/common/io_metrics"
+            (original / "common").mkdir(parents=True)
+            expected.mkdir(parents=True)
+            (expected / "Kconfig").write_text('config OPLUS_FEATURE_STORAGE_IO_METRICS\n  tristate "metrics"\n', encoding="utf-8")
+            storage = kernel / "drivers/soc/oplus/storage"
+            storage.parent.mkdir(parents=True)
+            try:
+                storage.symlink_to(original, target_is_directory=True)
+            except OSError as error:
+                if getattr(error, "winerror", None) == 1314:
+                    self.skipTest("Windows symlink privilege is unavailable")
+                raise
+            original_link = os.readlink(storage)
+            dependencies.ensure_extra_links(kernel, vendor)
+            dependencies.ensure_extra_links(kernel, vendor)
+            self.assertEqual(os.readlink(storage), original_link)
+            self.assertEqual((storage / "common/io_metrics").resolve(), expected.resolve())
+            self.assertEqual((storage / "common/io_metrics/Kconfig").read_bytes(), (expected / "Kconfig").read_bytes())
+
     def test_original_oem_link_layout_is_preserved(self):
         kernel = ROOT / "编译用内核树" / "android_kernel_oneplus_sm8750"
         self.assertEqual(dependencies.vendor_target(kernel, "kernel/oplus_cpu", "../../../vendor/oplus/kernel/cpu"),

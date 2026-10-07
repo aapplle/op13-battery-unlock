@@ -12,6 +12,12 @@ import sys
 VENDOR_COMMIT = "d50b305f7da9e14715a25120a4ac7b1a4b8b97c3"
 VENDOR_URL = "https://github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8750.git"
 VENDOR_NAME = "android_kernel_modules_and_devicetree_oneplus_sm8750"
+# The pinned kernel's storage link selects storage_feature_in_module, while its
+# drivers/soc/Kconfig also sources io_metrics from the sibling common directory.
+# Add this one generated alias without editing either repository's tracked files.
+EXTRA_LINKS = {
+    "drivers/soc/oplus/storage/common/io_metrics": "vendor/oplus/kernel/storage/common/io_metrics",
+}
 
 
 def git(directory, *args):
@@ -66,6 +72,23 @@ def ensure_mount(kernel, vendor):
         mount.symlink_to(expected, target_is_directory=True)
 
 
+def ensure_extra_links(kernel, vendor):
+    vendor = Path(vendor).resolve()
+    for name, target in EXTRA_LINKS.items():
+        alias = Path(kernel) / name
+        expected = (vendor / target).resolve()
+        parent = alias.parent.resolve()
+        if not expected.is_dir() or not parent.is_dir() or not parent.is_relative_to(vendor):
+            raise ValueError(f"OEM compatibility link has an absent or unexpected parent/target: {name}")
+        if alias.is_symlink():
+            if alias.resolve() != expected:
+                raise ValueError(f"OEM compatibility link points elsewhere: {name}")
+        elif alias.exists():
+            raise ValueError(f"OEM compatibility path already exists and is not a symlink: {name}")
+        else:
+            alias.symlink_to(os.path.relpath(expected, parent), target_is_directory=True)
+
+
 def check_kconfig_sources(kernel):
     """Check transitive source directives, including those under disabled if blocks."""
     kernel = Path(kernel).resolve()
@@ -107,18 +130,22 @@ def vendor_manifest(kernel):
     mount = kernel.parent.parent / "vendor"
     if not mount.is_symlink() or mount.resolve() != (vendor / "vendor").resolve():
         raise ValueError("vendor mount no longer points to the pinned dependency checkout")
-    links = kernel_links(kernel)
+    links = {**kernel_links(kernel), **EXTRA_LINKS}
+    for name, target in EXTRA_LINKS.items():
+        alias = kernel / name
+        if not alias.is_symlink() or alias.resolve() != (vendor / target).resolve():
+            raise ValueError(f"OEM compatibility link changed: {name}")
     broken = [name for name in links if not (kernel / name).exists()]
     if broken:
         raise ValueError("broken OEM links: " + ", ".join(broken))
-    return {"repository": VENDOR_URL, "commit": commit, "links": links,
+    return {"repository": VENDOR_URL, "commit": commit, "links": links, "extra_links": EXTRA_LINKS,
             "links_sha256": hashlib.sha256(json.dumps(links, sort_keys=True).encode()).hexdigest()}
 
 
 def fetch(kernel):
     kernel = Path(kernel).resolve()
     vendor = repository(kernel)
-    links = kernel_links(kernel)
+    links = {**kernel_links(kernel), **EXTRA_LINKS}
     if not (vendor / ".git").is_dir():
         if vendor.exists() and any(vendor.iterdir()):
             raise ValueError(f"vendor checkout path is not an empty directory: {vendor}")
@@ -147,6 +174,7 @@ def fetch(kernel):
     git(vendor, "sparse-checkout", "set", "--cone", "--", *sparse)
     git(vendor, "checkout", "--detach", VENDOR_COMMIT)
     ensure_mount(kernel, vendor)
+    ensure_extra_links(kernel, vendor)
     record = vendor_manifest(kernel)
     count = check_kconfig_sources(kernel)
     (kernel / "vendor-dependencies.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")

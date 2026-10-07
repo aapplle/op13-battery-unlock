@@ -113,6 +113,8 @@ def verify_manifest(root, module=None, manifest=None):
     vendor = record.get("vendor", {})
     if vendor.get("commit") != dependencies["VENDOR_COMMIT"] or vendor.get("repository") != dependencies["VENDOR_URL"]:
         raise ValueError("build manifest vendor dependency mismatch")
+    if vendor.get("extra_links") != dependencies["EXTRA_LINKS"]:
+        raise ValueError("build manifest vendor compatibility mapping mismatch")
     links = vendor.get("links", {})
     if not links or vendor.get("links_sha256") != hashlib.sha256(json.dumps(links, sort_keys=True).encode()).hexdigest():
         raise ValueError("build manifest vendor link mapping mismatch")
