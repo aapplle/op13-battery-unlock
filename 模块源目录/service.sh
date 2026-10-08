@@ -25,6 +25,10 @@ CAPUE=/sys/class/power_supply/battery/uevent
 [ -f "$MODDIR/log.sh" ] && . "$MODDIR/log.sh"
 command -v uv_log >/dev/null 2>&1 || uv_log() { echo "uv2800: $*"; }
 uv_lock || exit 1
+if [ -e "$MODDIR/remove" ]; then
+    uv_log "模块已安排删除，本次不再应用设置"
+    exit 0
+fi
 klog() { uv_log "$@"; }
 
 # 原值备份统一入口
@@ -178,6 +182,7 @@ if [ -f "$BK/skip" ]; then
 elif [ -f "$BK/no_adsp_write" ]; then
     klog "检测到 no_adsp_write 标记，本次不写电量计终止电压（测试用）"
 else
+    rm -f "$BK/uninstall_verified" || exit 1
     uv_set_targets "$V_S" "$ADSP_TARGET" "$P" || { klog "错误：设置解耦 hook 参数失败"; exit 1; }
     # 持锁期间 action 会等待；不再通过非原子的 skip 检查协调写入。
     i=0; cur=""

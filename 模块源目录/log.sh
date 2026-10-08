@@ -70,6 +70,67 @@ uv_set_targets() {
         [ "$(cat "$_ut_p/resume" 2>/dev/null)" = 0 ]
 }
 
+# 管理器卸载只是设置 remove；实际删除阶段不以 uninstall.sh 的退出码为闸门。
+# 因而一键流程必须在任何恢复写入前撤销旧安排，成功验证后才重新安排。
+uv_cancel_remove() {
+    rm -f "$1/remove" /data/adb/modules_update/uv2800/remove || return 1
+    [ ! -e "$1/remove" ] && [ ! -e /data/adb/modules_update/uv2800/remove ]
+}
+
+uv_find_ksud() {
+    for _uk_bin in /data/adb/ksud /data/adb/ksu/bin/ksud; do
+        if [ -x "$_uk_bin" ]; then echo "$_uk_bin"; return 0; fi
+    done
+    command -v ksud 2>/dev/null
+}
+
+uv_schedule_remove() {
+    _us_dir=$1
+    _us_ksud=$(uv_find_ksud) || _us_ksud=""
+    if [ -n "$_us_ksud" ]; then
+        "$_us_ksud" module uninstall uv2800 || return 1
+    else
+        # 本模块没有 initrc；官方 CLI 缺失时，使用公开的 remove 文件协议。
+        touch "$_us_dir/remove" || return 1
+    fi
+    [ -f "$_us_dir/remove" ]
+}
+
+# 单芯 voltage_now 以微伏上报；返回本次确认可恢复的毫伏值。
+uv_restore_voltage() {
+    _uv_v=$(cat /sys/class/power_supply/battery/voltage_now 2>/dev/null) || return 1
+    case "$_uv_v" in ''|*[!0-9]*|??????????*) return 1 ;; esac
+    [ "$_uv_v" -ge 2000000 ] 2>/dev/null && [ "$_uv_v" -le 5000000 ] 2>/dev/null || return 1
+    _uv_v=$((_uv_v / 1000))
+    [ "$_uv_v" -ge 3300 ] && [ "$_uv_v" -gt "$1" ] || return 1
+    echo "$_uv_v"
+}
+
+uv_record_uninstall() {
+    echo "$1" > "$UV_BK/uninstall_verified.tmp" &&
+        mv -f "$UV_BK/uninstall_verified.tmp" "$UV_BK/uninstall_verified"
+}
+
+# 只供卸载时报告“上次验证”的证据，绝不替代在模块仍加载时的实时读取。
+uv_previous_uninstall() {
+    [ -f "$UV_BK/skip" ] && [ ! -e "$UV_BK/restore_pending" ] || return 1
+    _up_v=$(cat "$UV_BK/uninstall_verified" 2>/dev/null) || return 1
+    case "$_up_v" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$_up_v" -ge 2000 ] 2>/dev/null && [ "$_up_v" -le 5000 ] 2>/dev/null || return 1
+    [ "$(cat "$UV_BK/adsp_orig.txt" 2>/dev/null)" = "$_up_v" ] || return 1
+    echo "$_up_v"
+}
+
+# umount 返回失败既可能是“未挂载”，也可能是权限/命名空间错误；单独只读确认。
+uv_capacity_unbound() {
+    for _um_file in /proc/1/mountinfo /proc/self/mountinfo; do
+        [ -r "$_um_file" ] || return 1
+        _um_info=$(cat "$_um_file" 2>/dev/null) || return 1
+        [ -n "$_um_info" ] || return 1
+        case "$_um_info" in *chip_soc*) return 1 ;; esac
+    done
+}
+
 uv_log() {
     _m="uv2800: $*"
     echo "$_m"

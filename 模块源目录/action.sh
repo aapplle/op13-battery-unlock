@@ -1,11 +1,11 @@
 #!/system/bin/sh
 # ============================================================
-# uv2800 - 操作按钮：把「原值」写回电量计 ADSP
+# uv2800 - 操作按钮：一键安全卸载（--restore-only 仅恢复）
 #
 # 【为什么需要这个按钮】
 #   社区主流方案是修改 dtbo。刷回原版 dtbo 也【不能】恢复电量计里
 #   已经被写入的终止电压，只能等它按约 20mV/次充放电慢慢恢复。
-#   本按钮提供一个手动恢复手段。
+#   本按钮先恢复并实时验证，通过后才安排 KernelSU 删除；失败保留模块。
 #
 # 【原值是怎么算出来的】
 #   ① 优先用【首次写入前的备份】adsp_orig.txt（那是驱动自己算出来的值）；
@@ -25,13 +25,20 @@
 #   UV2800_DRYRUN=1 sh action.sh   # 只算不写，用于验证计算路径
 # ============================================================
 
+MODE=uninstall
+case "$#:$1" in
+    0:) ;;
+    1:--restore-only) MODE=restore ;;
+    *) echo "用法：sh action.sh [--restore-only]"; exit 2 ;;
+esac
+
 MODDIR=${0%/*}
 # 日志函数（stdout + dmesg + 落盘到备份目录），见 log.sh
 [ -f "$MODDIR/log.sh" ] && . "$MODDIR/log.sh"
 command -v uv_log >/dev/null 2>&1 || uv_log() { echo "uv2800: $*"; }
 
 uv_lock || exit 1
-uv_log_sep "action.sh 恢复原值 开始"
+uv_log_sep "action.sh 开始（mode=$MODE）"
 
 PARAM=/sys/module/uv2800/parameters/adsp_write
 VBAT=/sys/class/oplus_chg/battery/vbat_uv
@@ -40,12 +47,32 @@ BK=/data/adb/uv2800_backup
 P=${PARAM%/*}
 
 restore_fail() {
-    uv_log "恢复尚未完成：$*；保留 skip / restore_pending，请重试恢复后再卸载"
+    if [ "$UV2800_DRYRUN" != 1 ]; then
+        touch "$BK/restore_pending" 2>/dev/null
+        rm -f "$BK/uninstall_verified" "$BK/uninstall_verified.tmp"
+        if [ "$MODE" = uninstall ]; then
+            uv_cancel_remove "$MODDIR" || uv_log "警告：撤销删除标记失败，请先在管理器取消卸载"
+        fi
+    fi
+    uv_log "操作未完成：$*；未新增删除安排，请排除问题后重试"
     exit 1
 }
 
+# 先撤销用户先前在管理器安排的删除；失败时不得开始恢复写入。
+if [ "$UV2800_DRYRUN" != 1 ]; then
+    if [ "$MODE" = uninstall ] && ! uv_cancel_remove "$MODDIR"; then
+        uv_log "错误：撤销已有删除安排失败，未写设备；请先在管理器取消卸载"
+        exit 1
+    fi
+    rm -f "$BK/uninstall_verified" "$BK/uninstall_verified.tmp" || exit 1
+fi
+
 echo "=========================================="
-echo "  uv2800  恢复原值（写回电量计 ADSP）"
+if [ "$MODE" = uninstall ]; then
+    echo "  uv2800  一键安全卸载"
+else
+    echo "  uv2800  仅恢复原值"
+fi
 [ "$UV2800_DRYRUN" = "1" ] && echo "  【试运行模式：只算不写】"
 echo "=========================================="
 echo ""
@@ -55,25 +82,7 @@ if [ ! -e "$PARAM" ]; then
     echo "  说明模块没有加载。请检查："
     echo "  - /data/adb/modules/uv2800/disable 是否存在"
     echo "  - 或重启手机后再试"
-    exit 1
-fi
-
-# --- 0) 低电压警告 -------------------------------------------------
-# 实测依据（文档 §23.4.4）：若在电量计空电点附近（vbat < 回写目标）执行回写，
-# vbat < term 会让电量计进入钳位态（DOD=100% 不自愈），需要充满一次才恢复。
-# 注意：本机 voltage_now 是【单芯】电压（µV），不是双芯之和。
-VN=$(cat "$VOLT_NOW" 2>/dev/null)
-case "$VN" in ''|*[!0-9]*) VN=0 ;; esac
-VN=$((VN / 1000))
-if [ "$VN" -gt 0 ]; then
-    echo "- 当前电池电压: ${VN} mV"
-    if [ "$VN" -lt 3300 ]; then
-        echo ""
-        echo "  ⚠️⚠️ 电池电压偏低（< 3300mV）⚠️⚠️"
-        echo "  建议先充电到 3250mV 以上再执行回写，"
-        echo "  否则电量计可能进入钳位态（SOC 卡 0%，需充满一次才恢复）。"
-        echo ""
-    fi
+    restore_fail "模块未加载，未执行恢复"
 fi
 
 # --- 1) 计算原值：① 首次写入前的备份  ② 厂商标准重算（兜底）---------
@@ -90,7 +99,7 @@ if [ -f "$ORIG" ]; then
         echo "- ⚠️ adsp_orig.txt=$T mV 疑似污染值（DT 表最低档 3000），改用厂商标准重算"
         uv_log "adsp_orig.txt=$T 疑似污染${UV2800_DRYRUN:+（试运行时保留备份）}"
         if [ "$UV2800_DRYRUN" != "1" ]; then
-            mv -f "$ORIG" "$BK/adsp_orig.bad" || exit 1
+            mv -f "$ORIG" "$BK/adsp_orig.bad" || restore_fail "隔离原值备份失败"
         fi
         T=""
     fi
@@ -115,7 +124,7 @@ if [ "$TARGET" -lt 2000 ] || [ "$TARGET" -gt 5000 ]; then
     echo "    battery temp       = $(cat /sys/class/power_supply/battery/temp 2>/dev/null)"
     echo "    （重跑时加 UV_DT_DEBUG=1 可打印完整推导过程）"
     echo "    adsp_orig.txt = $([ -f "$ORIG" ] && cat "$ORIG" || echo '不存在')"
-    exit 1
+    restore_fail "原厂值计算失败"
 fi
 echo "- 算出的原值 : ${TARGET} mV"
 echo ""
@@ -124,6 +133,10 @@ if [ "$UV2800_DRYRUN" = "1" ]; then
     echo "【试运行】目标值 ${TARGET} mV 计算完成，未写设备或修改原值备份。"
     exit 0
 fi
+
+# 电压低于回写空电点可能钳位 SOC。未知/低电压一律停止，不用电量百分比猜测。
+VN=$(uv_restore_voltage "$TARGET") || restore_fail "电压未知或偏低：需单芯至少 3300 mV 且高于恢复目标 ${TARGET} mV，请充电后重试"
+echo "- 当前单芯电压 ${VN} mV，满足恢复条件"
 
 # 恢复操作与 service / uninstall 共用锁。先记录意图，再改参数/硬件。
 mkdir -p "$BK" && touch "$BK/skip" "$BK/restore_pending" || restore_fail "写入恢复标记失败"
@@ -151,7 +164,6 @@ _rb=$(uv_read_adsp "$P") || restore_fail "回写后读取失败"
 echo "$TARGET" > "$BK/adsp_state" || restore_fail "保存验证结果失败"
 CURV=$(cat "$VBAT" 2>/dev/null | tr -d "[:space:]")
 [ "$CURV" = "$TARGET" ] || restore_fail "关机电压 ${CURV:-未知} mV 未跟随 ${TARGET} mV"
-okv=skip
 echo "- 已实时验证：ADSP / 关机电压均为 ${TARGET} mV"
 
 # --- 5) 同时恢复「禁止超级省电」设备策略 ---------------------
@@ -177,47 +189,34 @@ if [ -f "$BK/orig_state" ]; then
     fi
 fi
 # 打上 skip 标记：以后开机不再重新应用设备策略
-mkdir -p "$BK" && touch "$BK/skip"
-rm -f "$BK/target_mv" "$BK/no_adsp_write"
+mkdir -p "$BK" && touch "$BK/skip" || restore_fail "保存恢复意图失败"
+rm -f "$BK/target_mv" "$BK/no_adsp_write" || restore_fail "清理运行配置失败"
 echo "- 已恢复（超级省电功能将恢复可用）"
 
 # --- 6) 恢复官方平滑电量显示 ---
 CAP=/sys/class/power_supply/battery/capacity
 uv_unbind_capacity "$CAP"
 _un=$?
+uv_capacity_unbound || restore_fail "电量挂载仍有残留或 mountinfo 读取失败"
 if [ "$_un" -gt 0 ]; then
     echo "- 已恢复官方平滑电量显示（解绑 $_un 层）"
 else
     echo "- 电量显示本来就是官方平滑值，无需恢复"
 fi
 
-echo ""
-echo "=========================================="
+# 在安排删除之前再次读回，避免把仅有历史记录当成当前成功。
+VN=$(uv_restore_voltage "$TARGET") || restore_fail "最终电压复核未通过，请充电后重试"
+_rb=$(uv_read_adsp "$P") || restore_fail "最终 ADSP 读取失败"
+[ "$_rb" = "$TARGET" ] || restore_fail "最终 ADSP 读回不一致"
+[ "$(cat "$VBAT" 2>/dev/null)" = "$TARGET" ] || restore_fail "最终关机电压读回不一致"
 rm -f "$BK/restore_pending" || restore_fail "清理待恢复标记失败"
-echo "  回写完成！"
-echo ""
-echo "  已同时完成："
-echo "   · 电量计终止电压回写原值"
-echo "   · 超级省电设备策略恢复"
-echo "   · 官方平滑电量显示恢复"
-echo ""
-echo "  接下来请："
-echo "   1. 关闭（或卸载）本模块"
-# 区分两种情况：
-#   okv=skip   ：回写后 vbat_uv 已等于目标值（正常路径 —— hook 即时强制）
-#   其他       ：hook 未生效（重启后自动跟随）
-if [ "$okv" = "skip" ]; then
-    echo "   2. vbat_uv 已是 ${TARGET} mV"
+if [ "$MODE" = uninstall ]; then
+    uv_record_uninstall "$TARGET" || restore_fail "保存卸载验证记录失败"
+    uv_schedule_remove "$MODDIR" || restore_fail "KernelSU 删除安排失败（恢复已执行，模块保留）"
+    uv_log "一键安全卸载已安排：原值 ${TARGET} mV 已实时验证，请重启完成删除"
+    echo "一键安全卸载已安排，请重启手机。无需再点管理器的卸载按钮。"
 else
-    echo "   2. vbat_uv 尚未跟随（当前 $(cat "$VBAT" 2>/dev/null) mV），重启后自动生效"
+    uv_log "恢复完成：原值 ${TARGET} mV 已实时验证，未新增删除安排"
+    echo "回写完成！本次仅恢复，模块保留。"
+    echo "重新解耦：rm /data/adb/uv2800_backup/skip 后重启。"
 fi
-echo "   ⚠️ 卸载后 skip 标记会保留，重装/软重启后仍保持原厂状态"
-echo "      若要重新解耦：rm /data/adb/uv2800_backup/skip 后重启"
-echo "   3. 验证：cat $VBAT   应显示 ${TARGET}"
-echo "      或看驱动内部 fcc：dmesg | grep bs_update_data | tail -1"
-echo ""
-uv_log "恢复完成：原值 ${TARGET} mV，vbat_uv 刷新=${okv:-0}（skip=本已相等，0=未生效待重启）"
-echo "  若以后重新启用本模块，请先执行："
-echo "   rm /data/adb/uv2800_backup/skip"
-echo "  （否则「禁止超级省电」策略与真实电量显示都不会重新应用）"
-echo "=========================================="

@@ -36,6 +36,7 @@ class ScriptTests(unittest.TestCase):
         self.bk = self.root / "data/adb/uv2800_backup"
         self.params = self.root / "sys/module/uv2800/parameters"
         for path in (self.bk, self.params, self.root / "data/system",
+                     self.root / "proc/1", self.root / "proc/self",
                      self.root / "sys/class/power_supply/battery",
                      self.root / "sys/class/oplus_chg/battery"):
             path.mkdir(parents=True, exist_ok=True)
@@ -47,9 +48,11 @@ class ScriptTests(unittest.TestCase):
         self.put("sys/class/oplus_chg/battery/vbat_uv", "2800")
         self.put("sys/class/power_supply/battery/voltage_now", "3800000")
         self.put("hardware_voltage", "2540")
+        for pid in ("1", "self"):
+            self.put("proc/" + pid + "/mountinfo", "1 0 0:1 / / rw - rootfs rootfs rw\n")
         for original in SCRIPTS.glob("*.sh"):
             source = original.read_text(encoding="utf-8")
-            for absolute in ("/sys/", "/data/"):
+            for absolute in ("/sys/", "/data/", "/proc/"):
                 source = source.replace(absolute, self.root.as_posix() + absolute)
             (self.root / original.name).write_text(source, encoding="utf-8", newline="\n")
         # Emulate only Android commands/sysfs callbacks, retaining production control flow.
@@ -58,7 +61,8 @@ class ScriptTests(unittest.TestCase):
 uv_log() { echo "LOG $*"; }
 uv_log_sep() { :; }
 uv_capture_dev() { :; }
-uv_dt_orig() { echo 3250; }
+uv_dt_orig() { [ "$FAKE_MODE" = dt_error ] && return 1; echo 3250; }
+uv_find_ksud() { [ -n "$FAKE_KSUD" ] && echo "$FAKE_KSUD"; }
 uv_unbind_capacity() { return 0; }
 lsmod() { echo "uv2800 100 0"; }
 sleep() { :; }
@@ -99,10 +103,10 @@ cat() {
     def put(self, name, value):
         (self.root / name).write_text(value, encoding="utf-8")
 
-    def run_script(self, name="action.sh", mode="success", **extra):
+    def run_script(self, name="action.sh", mode="success", args=(), **extra):
         env = dict(os.environ, FAKE_ROOT=self.root.as_posix(), FAKE_MODE=mode,
                    KSU_LATE_LOAD="1", **extra)
-        return subprocess.run([BASH, (self.root / name).as_posix()], env=env,
+        return subprocess.run([BASH, (self.root / name).as_posix(), *args], env=env,
                               capture_output=True, text=True, encoding="utf-8", timeout=20)
 
     def assert_failed_restore(self, result):
@@ -112,6 +116,8 @@ cat() {
         self.assertTrue((self.bk / "restore_pending").exists())
         self.assertFalse((self.bk / "adsp_state").exists())
         self.assertFalse((self.root / "policy").exists(), "failure must stop before policy mutation")
+        self.assertFalse((self.root / "remove").exists())
+        self.assertFalse((self.bk / "uninstall_verified").exists())
 
     def test_readback_mismatch_is_failure(self):
         self.assert_failed_restore(self.run_script(mode="mismatch"))
@@ -140,11 +146,174 @@ cat() {
 
     def test_success_requires_live_read_even_when_value_already_matches(self):
         self.put("hardware_voltage", "3250")
-        result = self.run_script()
+        result = self.run_script(args=("--restore-only",))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("回写完成！", result.stdout)
         self.assertEqual((self.params / "adsp_write").read_text(), "not-written")
         self.assertGreaterEqual(len((self.root / "read_events").read_text().splitlines()), 2)
+
+    def test_default_action_schedules_verified_uninstall(self):
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("一键安全卸载已安排", result.stdout)
+        self.assertTrue((self.root / "remove").is_file())
+        self.assertEqual((self.bk / "uninstall_verified").read_text().strip(), "3250")
+        self.assertFalse((self.bk / "restore_pending").exists())
+
+    def test_restore_only_preserves_module_and_does_not_schedule(self):
+        result = self.run_script(args=("--restore-only",))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse((self.root / "remove").exists())
+        self.assertFalse((self.bk / "uninstall_verified").exists())
+
+    def test_restore_only_does_not_cancel_existing_remove(self):
+        (self.root / "remove").touch()
+        result = self.run_script(args=("--restore-only",))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((self.root / "remove").exists())
+
+    def test_old_remove_is_cancelled_before_failed_restore(self):
+        (self.root / "remove").touch()
+        updated = self.root / "data/adb/modules_update/uv2800"
+        updated.mkdir(parents=True)
+        (updated / "remove").touch()
+        self.assert_failed_restore(self.run_script(mode="read_error"))
+        self.assertFalse((updated / "remove").exists())
+        result = self.run_script(args=("--restore-only",))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse((self.root / "remove").exists())
+
+    def test_failed_cancel_does_not_touch_hardware(self):
+        (self.root / "remove").mkdir()
+        result = self.run_script()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("撤销已有删除安排失败", result.stdout)
+        self.assertEqual((self.params / "adsp_write").read_text(), "not-written")
+        self.assertEqual((self.params / "uv_target_mv").read_text(), "2800")
+        self.assertFalse((self.root / "read_events").exists())
+
+    def test_low_missing_or_invalid_voltage_never_writes_or_schedules(self):
+        for value in ("3299000", "0", "garbage", "99999999999999999999", None):
+            with self.subTest(value=value):
+                voltage = self.root / "sys/class/power_supply/battery/voltage_now"
+                if value is None:
+                    voltage.unlink()
+                else:
+                    voltage.write_text(value)
+                result = self.run_script()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual((self.params / "adsp_write").read_text(), "not-written")
+                self.assertEqual((self.params / "uv_target_mv").read_text(), "2800")
+                self.assertFalse((self.root / "remove").exists())
+                self.assertFalse((self.root / "read_events").exists())
+
+    def test_voltage_must_exceed_factory_target(self):
+        (self.bk / "adsp_orig.txt").write_text("3350")
+        self.put("sys/class/power_supply/battery/voltage_now", "3350000")
+        result = self.run_script()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((self.params / "adsp_write").read_text(), "not-written")
+        self.assertFalse((self.root / "remove").exists())
+
+    def test_3300mv_is_accepted_when_above_target(self):
+        self.put("sys/class/power_supply/battery/voltage_now", "3300000")
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((self.root / "remove").exists())
+
+    def test_unknown_factory_value_never_writes_or_schedules(self):
+        (self.bk / "adsp_orig.txt").unlink()
+        result = self.run_script(mode="dt_error")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((self.params / "adsp_write").read_text(), "not-written")
+        self.assertFalse((self.root / "remove").exists())
+        self.assertFalse((self.root / "read_events").exists())
+
+    def make_ksud(self, fail=False):
+        cli = self.root / "fake-ksud"
+        cli.write_text('#!/bin/sh\nprintf "%s\\n" "$*" > "$FAKE_ROOT/ksud_calls"\n'
+                       'test -f "$FAKE_ROOT/data/adb/uv2800_backup/uninstall_verified" || exit 9\n'
+                       'touch "$FAKE_ROOT/remove"\n' + ('exit 1\n' if fail else 'exit 0\n'),
+                       encoding="utf-8", newline="\n")
+        cli.chmod(0o755)
+        return cli.as_posix()
+
+    def test_official_cli_is_used_after_verification(self):
+        result = self.run_script(FAKE_KSUD=self.make_ksud())
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.root / "ksud_calls").read_text().strip(), "module uninstall uv2800")
+        self.assertTrue((self.root / "remove").exists())
+
+    def test_failed_scheduling_rolls_back_partial_marker(self):
+        result = self.run_script(FAKE_KSUD=self.make_ksud(fail=True))
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse((self.root / "remove").exists())
+        self.assertFalse((self.bk / "uninstall_verified").exists())
+        self.assertTrue((self.bk / "restore_pending").exists())
+        self.assertNotIn("一键安全卸载已安排", result.stdout)
+
+    def test_service_does_not_apply_after_removal_scheduled(self):
+        (self.root / "remove").touch()
+        result = self.run_script("service.sh")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.params / "uv_target_mv").read_text(), "2800")
+        self.assertFalse((self.root / "policy").exists())
+        self.assertFalse((self.root / "read_events").exists())
+
+    def test_decoupling_invalidates_previous_uninstall_verification(self):
+        (self.bk / "uninstall_verified").write_text("3250")
+        result = self.run_script("service.sh")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse((self.bk / "uninstall_verified").exists())
+
+    def test_mount_residue_or_unreadable_info_blocks_scheduling(self):
+        for pid in ("1", "self"):
+            with self.subTest(pid=pid):
+                info = self.root / "proc" / pid / "mountinfo"
+                clean = info.read_text()
+                info.write_text("1 0 0:1 /chip_soc /capacity rw - sysfs sysfs rw\n")
+                result = self.run_script()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse((self.root / "remove").exists())
+                info.unlink()
+                result = self.run_script()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse((self.root / "remove").exists())
+                info.write_text(clean)
+
+    def hide_kernel(self):
+        hidden = self.root / "inactive_parameters"
+        assert self.params.resolve().is_relative_to(self.root.resolve())
+        assert hidden.resolve().is_relative_to(self.root.resolve())
+        self.params.rename(hidden)
+
+    def test_early_uninstall_distinguishes_verified_history(self):
+        (self.bk / "skip").touch()
+        (self.bk / "uninstall_verified").write_text("3250")
+        (self.bk / "orig_state").write_text("absent")
+        self.hide_kernel()
+        result = self.run_script("uninstall.sh")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("上次一键卸载已验证", result.stdout)
+        self.assertFalse((self.bk / "restore_pending").exists())
+        self.assertTrue((self.bk / "uninstall_verified").exists())
+
+    def test_early_uninstall_without_verification_preserves_recovery_data(self):
+        (self.bk / "orig_state").write_text("absent")
+        self.hide_kernel()
+        result = self.run_script("uninstall.sh")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("退出码不具有阻止删除的作用", result.stdout)
+        self.assertTrue((self.bk / "restore_pending").exists())
+        self.assertTrue((self.bk / "orig_state").exists())
+        self.assertTrue((self.bk / "adsp_orig.txt").exists())
+
+    def test_live_uninstall_restores_without_nested_lock_or_new_removal(self):
+        result = self.run_script("uninstall.sh")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("卸载兜底已实时验证", result.stdout)
+        self.assertEqual((self.bk / "uninstall_verified").read_text().strip(), "3250")
+        self.assertFalse((self.root / "remove").exists())
 
     def test_dry_run_preserves_contaminated_backup(self):
         (self.bk / "adsp_orig.txt").write_text("2500")
@@ -153,6 +322,15 @@ cat() {
         self.assertEqual((self.bk / "adsp_orig.txt").read_text(), "2500")
         self.assertFalse((self.bk / "adsp_orig.bad").exists())
         self.assertFalse((self.bk / "skip").exists())
+        self.assertFalse((self.root / "read_events").exists())
+
+    def test_dry_run_does_not_change_existing_removal_or_evidence(self):
+        (self.root / "remove").touch()
+        (self.bk / "uninstall_verified").write_text("3250")
+        result = self.run_script(UV2800_DRYRUN="1")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((self.root / "remove").exists())
+        self.assertEqual((self.bk / "uninstall_verified").read_text(), "3250")
         self.assertFalse((self.root / "read_events").exists())
 
     def test_policy_process_failure_keeps_pending_and_does_not_claim_success(self):

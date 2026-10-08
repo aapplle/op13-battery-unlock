@@ -1,7 +1,7 @@
 #!/system/bin/sh
 # uv2800 测试：状态设置器
 #   apply.sh decouple [V_s]   解耦态（rm skip + 可选设 target_mv + 跑 service.sh）
-#   apply.sh factory          出厂态（跑 action.sh）
+#   apply.sh factory          出厂态（action.sh --restore-only，不安排卸载）
 #   apply.sh target <V_s>     只改 target_mv 并重跑 service.sh
 #   apply.sh reset_orig       删除 adsp_orig.txt / adsp_state / target_mv（回到首次安装状态）
 #   apply.sh pollute_orig <v> 污染 adsp_orig.txt（边界测试）
@@ -17,7 +17,7 @@ case "$1" in
     echo "rc=$?"
     ;;
   factory)
-    sh $M/action.sh > /data/local/tmp/uvtest/last_action.log 2>&1
+    sh $M/action.sh --restore-only > /data/local/tmp/uvtest/last_action.log 2>&1
     echo "rc=$?"
     ;;
   target)

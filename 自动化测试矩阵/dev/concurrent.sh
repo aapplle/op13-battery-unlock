@@ -1,7 +1,7 @@
 #!/system/bin/sh
 # ============================================================
 # uv2800 测试：并发竞态（T9.3 用）
-#   模拟"service.sh 解耦循环"与"用户点执行(action.sh)"同时发生
+#   模拟"service.sh 解耦循环"与"仅恢复(action.sh --restore-only)"同时发生
 #   输出：并发结束后的残留进程数与最终状态
 # ============================================================
 BK=/data/adb/uv2800_backup
@@ -10,13 +10,13 @@ LOG=/data/local/tmp/uvtest/last_concurrent.log
 
 rm -f $BK/skip
 : > $LOG
-echo "[concurrent] 启动 3×service.sh + 1×action.sh" >> $LOG
+echo "[concurrent] 启动 3×service.sh + 1×action.sh --restore-only" >> $LOG
 i=1
 while [ $i -le 3 ]; do
   sh $M/service.sh >> $LOG 2>&1 &
   i=$((i+1))
 done
-sh $M/action.sh >> $LOG 2>&1 &
+sh $M/action.sh --restore-only >> $LOG 2>&1 &
 
 sleep 15
 
