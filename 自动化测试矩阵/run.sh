@@ -419,32 +419,63 @@ want() {  # want <用例ID> —— 在 case_begin 之前调用，未选中则完
 }
 
 # ---------------- 动作封装 ----------------
-apply_dev() { sh_dev "$DEV_DIR/apply.sh" "$@"; }
+apply_dev() {
+  local rc=0
+  sh_dev "$DEV_DIR/apply.sh" "$@" || rc=$?
+  [ "$rc" -eq 0 ] || bad "设备动作 $1 失败（rc=$rc）"
+  return "$rc"
+}
 ensure_decouple() {
   local vs="${1:-2800}"
   snap >/dev/null 2>&1 || return 1
   # 快路径：已是解耦态且 target 正确 → 不重跑 service.sh（单次省 15~20s）
   if [ "${S[skip]:-}" = "no" ] && [ "${S[param_target]:-}" = "$vs" ]; then return 0; fi
-  apply_dev decouple "$vs" >/dev/null 2>&1
+  apply_dev decouple "$vs" >/dev/null 2>&1 || return 1
   wait_key param_target "$vs" 12
 }
 apply_target() {
-  apply_dev target "$1" >/dev/null 2>&1
+  apply_dev target "$1" >/dev/null 2>&1 || return 1
   wait_key param_target "$1" 12
 }
 ensure_factory() {
-  snap >/dev/null 2>&1 || return 1
-  [ "${S[skip]:-}" = "yes" ] && return 0
-  apply_dev factory >/dev/null 2>&1
-  wait_key skip yes 12
+  # skip 只是恢复意图；必须重新成功执行 action 并确认整个事务已完成。
+  apply_dev factory >/dev/null 2>&1 || { bad "恢复动作失败"; return 1; }
+  snap || return 1
+  assert_factory_completed
+}
+
+factory_state_ready() {
+  local target="${S[restore_target]:-}"
+  case "$target" in [23][0-9][0-9][0-9]) ;; *) return 1 ;; esac
+  [ "$target" -ge 2900 ] && [ "$target" -le 3500 ] &&
+    [ "${S[skip]:-}" = yes ] && [ "${S[restore_pending]:-}" = no ] &&
+    [ "${S[param_target]:-}" = "$target" ] && [ "${S[param_adsp]:-}" = "$target" ] &&
+    [ "${S[adsp_read]:-}" = "$target" ] && [ "${S[adsp_state]:-}" = "$target" ] &&
+    [ "${S[vbat_uv]:-}" = "$target" ] && [ "${S[param_resume]:-}" = 0 ] &&
+    [ "${S[bind_layers]:-}" = 0 ]
+}
+
+assert_factory_completed() {
+  A "恢复事务已完成：pending=no" restore_pending eq no
+  A "本次实时恢复目标有效" restore_target bt 2900 3500
+  factory_state_ready || { bad "恢复记录与实时硬件/挂载状态不一致"; return 1; }
+}
+
+wait_factory_state() {
+  local remaining="${1:-20}"
+  while [ "$remaining" -gt 0 ]; do
+    snap || return 1
+    if factory_state_ready; then assert_factory_completed; return; fi
+    remaining=$((remaining-1))
+    [ "$remaining" -eq 0 ] || sleep 1
+  done
+  assert_factory_completed
 }
 
 # 每条 T2 都独立执行一次解耦→恢复，单例和 --resume 不依赖 T2.1 的副作用。
 setup_factory_case() {
   ensure_decouple 2800 || { bad "T2 解耦准备失败"; return 1; }
-  apply_dev factory >/dev/null 2>&1 || { bad "T2 恢复操作失败"; return 1; }
-  wait_key skip yes 12 || { bad "T2 恢复态等待失败"; return 1; }
-  snap
+  ensure_factory
 }
 
 soft_reboot() {
@@ -518,10 +549,10 @@ t_T0_1() { want T0.1 || return 0; case_begin T0.1 "环境就绪（adb+su+模块�
 t_T0_2() { want T0.2 || return 0; case_begin T0.2 "快照关键 key 齐全"
   snap || { bad "snap 失败"; case_end; return; }
   local k miss=0
-  for k in module_loaded param_target param_resume adsp_read vbat_uv chip_soc capacity bind_layers skip adsp_orig target_file count; do
+  for k in module_loaded param_target param_resume adsp_read vbat_uv chip_soc capacity bind_layers skip adsp_orig restore_target restore_pending target_file count; do
     [ "${S[$k]:-}" = "" ] && { bad "缺 key: $k"; miss=1; }
   done
-  [ $miss = 0 ] && ok "13 个关键 key 齐全"
+  [ $miss = 0 ] && ok "关键 key 齐全"
   case_end; }
 
 #CASE T1.1|解耦态：uv_target_mv == V_s
@@ -562,20 +593,20 @@ t_T2_1() { want T2.1 || return 0; case_begin T2.1 "执行 → skip 创建"
 
 #CASE T2.2|「执行」→ ADSP 回写原厂值
 t_T2_2() { want T2.2 || return 0; case_begin T2.2 "执行 → ADSP = 原厂值"
-  setup_factory_case || { case_end; return; }; local ORIG="${S[adsp_orig]:-?}"
+  setup_factory_case || { case_end; return; }; local ORIG="${S[restore_target]}"
   A "adsp_read = 原厂($ORIG)" adsp_read eq "$ORIG"
   A "adsp_state = 原厂($ORIG)" adsp_state eq "$ORIG"
   case_end; }
 
 #CASE T2.3|「执行」→ uv_target_mv = 原厂值
 t_T2_3() { want T2.3 || return 0; case_begin T2.3 "执行 → uv_target_mv = 原厂值"
-  setup_factory_case || { case_end; return; }; local ORIG="${S[adsp_orig]:-?}"
+  setup_factory_case || { case_end; return; }; local ORIG="${S[restore_target]}"
   A "uv_target_mv = 原厂($ORIG)" param_target eq "$ORIG"
   case_end; }
 
 #CASE T2.4|「执行」→ vbat_uv 立即跟随（v10.17 核心修复，不插拔）
 t_T2_4() { want T2.4 || return 0; case_begin T2.4 "执行 → vbat_uv 立即 = 原厂（不插拔）"
-  setup_factory_case || { case_end; return; }; local ORIG="${S[adsp_orig]:-?}"
+  setup_factory_case || { case_end; return; }; local ORIG="${S[restore_target]}"
   A "vbat_uv = 原厂($ORIG)" vbat_uv eq "$ORIG"
   A "resume=0（已退出恢复模式）" param_resume eq 0
   case_end; }
@@ -601,10 +632,9 @@ t_T3_1() { want T3.1 || return 0; case_begin T3.1 "skip 无 + 软重启 → 解�
 #CASE T3.2|skip 有 + 软重启 → 出厂保持|reboot
 t_T3_2() { want T3.2 || return 0; case_begin T3.2 "skip 有 + 软重启 → 出厂保持"
   [ "$NO_REBOOT" = 1 ] && { skip_case T3.2 x "--no-reboot"; return; }
-  ensure_decouple 2800; snap; local ORIG="${S[adsp_orig]:-?}"
-  apply_dev factory >/dev/null 2>&1; sleep 3
+  setup_factory_case || { case_end; return; }
   soft_reboot || { skip_case T3.2 x "软重启不可用"; return; }
-  snap
+  wait_factory_state || { case_end; return; }; local ORIG="${S[restore_target]}"
   A "uv_target_mv = 原厂($ORIG)" param_target eq "$ORIG"
   A "vbat_uv = 原厂($ORIG)" vbat_uv eq "$ORIG"
   A "adsp_read = 原厂($ORIG)" adsp_read eq "$ORIG"
@@ -627,10 +657,9 @@ t_T4_1() { want T4.1 || return 0; case_begin T4.1 "硬重启+越狱（skip 无�
 #CASE T4.2|硬重启+越狱，skip 有 → 出厂（零插拔）|late
 t_T4_2() { want T4.2 || return 0; case_begin T4.2 "硬重启+越狱（skip 有）→ 出厂"
   [ "$NO_REBOOT" = 1 ] && { skip_case T4.2 x "--no-reboot"; return; }
-  ensure_decouple 2800; snap; local ORIG="${S[adsp_orig]:-?}"
-  apply_dev factory >/dev/null 2>&1; sleep 3
+  setup_factory_case || { case_end; return; }
   hard_reboot_jailbreak || { skip_case T4.2 x "硬重启/越狱失败"; return; }
-  snap
+  wait_factory_state || { case_end; return; }; local ORIG="${S[restore_target]}"
   A "uv_target_mv = 原厂($ORIG)" param_target eq "$ORIG"
   A "vbat_uv = 原厂($ORIG)" vbat_uv eq "$ORIG"
   A "adsp_read = 原厂($ORIG)" adsp_read eq "$ORIG"
@@ -640,10 +669,10 @@ t_T4_2() { want T4.2 || return 0; case_begin T4.2 "硬重启+越狱（skip 有�
 #CASE T5.1|解耦态 touch skip + 重启 → 出厂（ADSP 也拉回）|reboot
 t_T5_1() { want T5.1 || return 0; case_begin T5.1 "解耦态 touch skip + 重启 → ADSP 拉回原厂"
   [ "$NO_REBOOT" = 1 ] && { skip_case T5.1 x "--no-reboot"; return; }
-  ensure_decouple 2800; snap; local ORIG="${S[adsp_orig]:-?}"
-  sh_dev "$DEV_DIR/touchskip.sh" >/dev/null 2>&1
+  ensure_decouple 2800 || { bad "解耦准备失败"; case_end; return; }
+  sh_dev "$DEV_DIR/touchskip.sh" >/dev/null 2>&1 || { bad "设置 skip 失败"; case_end; return; }
   soft_reboot || { skip_case T5.1 x "软重启不可用"; return; }
-  snap
+  wait_factory_state || { case_end; return; }; local ORIG="${S[restore_target]}"
   A "adsp_read = 原厂($ORIG)（关键：解耦值必须被拉回）" adsp_read eq "$ORIG"
   A "vbat_uv = 原厂($ORIG)" vbat_uv eq "$ORIG"
   A "skip = yes" skip eq yes
@@ -720,8 +749,8 @@ t_T7_2() { want T7.2 || return 0; case_begin T7.2 "卸载 → 模块清理完备
 #CASE T8.1|adsp_orig.txt 污染（≤2900）→ 拒绝/隔离
 t_T8_1() { want T8.1 || return 0; case_begin T8.1 "adsp_orig 污染 → 拒绝"
   ensure_decouple 2800
-  apply_dev pollute_orig 2500 >/dev/null 2>&1
-  sleep 1; apply_dev factory >/dev/null 2>&1; sleep 3; snap
+  apply_dev pollute_orig 2500 >/dev/null 2>&1 || { case_end; return; }
+  ensure_factory || { case_end; return; }
   A "污染值未被当作原厂值回写（adsp_read != 2500）" adsp_read ne 2500
   A "已隔离 .bad 文件" bad_file eq yes
   case_end; }
@@ -757,7 +786,7 @@ t_T9_1() { want T9.1 || return 0; case_begin T9.1 "连续软重启 x3 -> 无残�
 #CASE T9.2|rm skip + 立即软重启 → 解耦态重建|reboot
 t_T9_2() { want T9.2 || return 0; case_begin T9.2 "rm skip + 立即重启 -> 解耦重建"
   [ "$NO_REBOOT" = 1 ] && { skip_case T9.2 x "--no-reboot"; return; }
-  ensure_factory
+  ensure_factory || { case_end; return; }
   local i=""
   for i in 1 2; do
     # rm skip 后【立即】重启，不给 service.sh 完成窗口（构造竞态）
@@ -782,8 +811,11 @@ t_T9_3() { want T9.3 || return 0; case_begin T9.3 "并发竞态 -> 收敛且自�
   AR "并发结束后 action.sh 残留 = 0" action_procs eq 0
   AR "内核模块仍唯一" mods eq 1
   # 终态必须【自洽】：skip 存在 => 三项全等于原厂值且不绑定；skip 不存在 => 解耦三件套
-  local org; org="${R[target]}"
+  local org
   if [ "${R[skip]}" = "yes" ]; then
+    snap && assert_factory_completed || { case_end; return; }
+    org="${S[restore_target]}"
+    AR "skip 态自洽：target=本次实时恢复目标" target eq "$org"
     AR "skip 态自洽：vbat=target" vbat eq "$org"
     AR "skip 态自洽：ADSP 硬件=target" adsp_hw eq "$org"
     AR "skip 态自洽：未绑定 capacity" bind eq 0

@@ -61,7 +61,7 @@ class ScriptTests(unittest.TestCase):
 uv_log() { echo "LOG $*"; }
 uv_log_sep() { :; }
 uv_capture_dev() { :; }
-uv_dt_orig() { [ "$FAKE_MODE" = dt_error ] && return 1; echo 3250; }
+uv_dt_orig() { [ "$FAKE_MODE" = dt_error ] && return 1; echo "${FAKE_DT:-3250}"; }
 uv_find_ksud() { [ -n "$FAKE_KSUD" ] && echo "$FAKE_KSUD"; }
 uv_unbind_capacity() { return 0; }
 lsmod() { echo "uv2800 100 0"; }
@@ -69,9 +69,28 @@ sleep() { :; }
 su() {
     [ "$FAKE_MODE" = policy_error ] && return 1
     case "$*" in
-        *"s16 true"*) echo true > "$FAKE_ROOT/policy" ;;
-        *"s16 false"*) echo false > "$FAKE_ROOT/policy" ;;
-        *) echo 'Result: Parcel(00000000 00000001)' ;;
+        *"oplusdevicepolicy 4 "*)
+            case "$FAKE_MODE" in
+                policy_get_exception) echo 'Result: Parcel(ffffffff 00000000)'; return 0 ;;
+                policy_empty) return 0 ;;
+            esac
+            _fake_policy=$(command cat "$FAKE_ROOT/policy" 2>/dev/null)
+            case "$_fake_policy" in
+                true) echo 'Result: Parcel(00000000 00000004 00720074 00650075 00000000)' ;;
+                false) echo 'Result: Parcel(00000000 00000005 00610066 0073006c 00000065)' ;;
+                *) echo 'Result: Parcel(00000000 ffffffff)' ;;
+            esac ;;
+        *"oplusdevicepolicy 1 "*)
+            echo setter >> "$FAKE_ROOT/policy_events"
+            [ "$FAKE_MODE" = policy_set_exception ] && { echo 'Result: Parcel(ffffffff 00000000)'; return 0; }
+            if [ "$FAKE_MODE" != policy_unchanged ]; then
+                case "$*" in
+                    *"s16 true"*) echo true > "$FAKE_ROOT/policy" ;;
+                    *"s16 false"*) echo false > "$FAKE_ROOT/policy" ;;
+                esac
+            fi
+            echo 'Result: Parcel(00000000 00000001)' ;;
+        *) return 1 ;;
     esac
 }
 cat() {
@@ -129,6 +148,102 @@ cat() {
         self.assertEqual((self.params / "adsp_write").read_text().strip(), "3250")
         self.assertGreaterEqual(len((self.root / "read_events").read_text().splitlines()), 2)
         self.assertFalse((self.bk / "restore_pending").exists())
+
+    def test_stale_original_never_overrides_live_target(self):
+        (self.bk / "adsp_orig.txt").write_text("3000")
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.params / "adsp_write").read_text().strip(), "3250")
+        self.assertEqual((self.bk / "restore_target_mv").read_text().strip(), "3250")
+        self.assertEqual((self.bk / "adsp_orig.txt").read_text(), "3000")
+        self.assertTrue((self.root / "remove").exists())
+
+    def test_live_target_failure_never_falls_back_to_valid_backup(self):
+        result = self.run_script(mode="dt_error")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((self.params / "uv_target_mv").read_text(), "2800")
+        self.assertEqual((self.params / "adsp_write").read_text(), "not-written")
+        self.assertFalse((self.root / "remove").exists())
+        self.assertTrue((self.bk / "restore_pending").exists())
+
+    def test_target_change_after_write_retains_pending(self):
+        with (self.root / "log.sh").open("a", encoding="utf-8") as output:
+            output.write(r'''
+uv_dt_orig() {
+    _fake_written=$(command cat "$FAKE_ROOT/sys/module/uv2800/parameters/adsp_write")
+    case "$_fake_written" in not-written) echo 3250 ;; *) echo 3300 ;; esac
+}
+''')
+        result = self.run_script()
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.params / "adsp_write").read_text().strip(), "3250")
+        self.assertTrue((self.bk / "restore_pending").exists())
+        self.assertFalse((self.bk / "adsp_state").exists())
+        self.assertFalse((self.root / "remove").exists())
+
+    def test_service_restoration_obeys_voltage_gate(self):
+        (self.bk / "skip").touch()
+        for value in ("3100000", "0", "invalid"):
+            with self.subTest(value=value):
+                self.put("sys/class/power_supply/battery/voltage_now", value)
+                result = self.run_script("service.sh")
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual((self.params / "uv_target_mv").read_text(), "2800")
+                self.assertEqual((self.params / "uv_adsp_mv").read_text(), "2540")
+                self.assertEqual((self.params / "adsp_write").read_text(), "not-written")
+                self.assertTrue((self.bk / "restore_pending").exists())
+                self.assertFalse((self.root / "read_events").exists())
+
+    def test_service_retries_do_not_clear_mount_failure(self):
+        info = self.root / "proc/1/mountinfo"
+        info.write_text("1 0 0:1 /chip_soc /capacity rw - sysfs sysfs rw\n")
+        first = self.run_script()
+        self.assertNotEqual(first.returncode, 0)
+        retried = self.run_script("service.sh")
+        self.assertNotEqual(retried.returncode, 0, retried.stdout + retried.stderr)
+        self.assertTrue((self.bk / "restore_pending").exists())
+        self.assertIn("chip_soc", info.read_text())
+        self.assertFalse((self.root / "remove").exists())
+
+    def test_binder_semantic_failures_never_schedule_removal(self):
+        for mode in ("policy_get_exception", "policy_empty", "policy_set_exception", "policy_unchanged"):
+            with self.subTest(mode=mode):
+                self.put("policy", "true")
+                result = self.run_script(mode=mode)
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual((self.root / "policy").read_text(), "true")
+                self.assertTrue((self.bk / "restore_pending").exists())
+                self.assertFalse((self.root / "remove").exists())
+
+    def test_shared_xml_and_unrelated_keys_are_preserved(self):
+        xml = self.root / "data/system/oplus_devicepolicy_data_customize.xml"
+        live = '<policies><entry key="unrelated" value="new"/></policies>'
+        xml.write_text(live)
+        (self.bk / "orig_state").write_text("existed")
+        (self.bk / "devicepolicy_orig.xml").write_text('<policies><entry key="unrelated" value="old"/></policies>')
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(xml.read_text(), live)
+        self.assertEqual((self.root / "policy").read_text().strip(), "false")
+
+    def test_invalid_old_policy_state_never_deletes_shared_xml(self):
+        xml = self.root / "data/system/oplus_devicepolicy_data_customize.xml"
+        xml.write_text('<policies><entry key="unrelated"/></policies>')
+        (self.bk / "orig_state").write_text("corrupt")
+        result = self.run_script()
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(xml.read_text(), '<policies><entry key="unrelated"/></policies>')
+        self.assertFalse((self.root / "remove").exists())
+        self.assertFalse((self.root / "policy_events").exists())
+        self.assertTrue((self.bk / "restore_pending").exists())
+
+    def test_uninstall_failure_retains_policy_snapshot(self):
+        (self.bk / "policy_orig").write_text("false")
+        self.put("sys/class/power_supply/battery/voltage_now", "3100000")
+        result = self.run_script("uninstall.sh")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((self.bk / "policy_orig").read_text(), "false")
+        self.assertTrue((self.bk / "restore_pending").exists())
 
     def test_failed_write_stops_restore(self):
         (self.params / "adsp_write").unlink()
@@ -210,7 +325,7 @@ cat() {
     def test_voltage_must_exceed_factory_target(self):
         (self.bk / "adsp_orig.txt").write_text("3350")
         self.put("sys/class/power_supply/battery/voltage_now", "3350000")
-        result = self.run_script()
+        result = self.run_script(FAKE_DT="3350")
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual((self.params / "adsp_write").read_text(), "not-written")
         self.assertFalse((self.root / "remove").exists())
@@ -290,6 +405,7 @@ cat() {
     def test_early_uninstall_distinguishes_verified_history(self):
         (self.bk / "skip").touch()
         (self.bk / "uninstall_verified").write_text("3250")
+        (self.bk / "restore_target_mv").write_text("3250")
         (self.bk / "orig_state").write_text("absent")
         self.hide_kernel()
         result = self.run_script("uninstall.sh")
@@ -346,7 +462,7 @@ cat() {
         self.assertEqual((self.params / "uv_target_mv").read_text().strip(), "3250")
         self.assertEqual((self.params / "uv_adsp_mv").read_text().strip(), "3250")
         self.assertTrue((self.bk / "restore_pending").exists())
-        self.assertEqual((self.root / "policy").read_text().strip(), "false")
+        self.assertFalse((self.root / "policy_events").exists())
 
     def test_skip_retries_and_clears_pending_only_after_verification(self):
         (self.bk / "skip").touch()

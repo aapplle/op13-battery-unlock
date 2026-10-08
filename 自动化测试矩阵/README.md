@@ -335,6 +335,8 @@ adb shell 'su -c "sh /data/local/tmp/uvtest/dtterm.sh"'   # 打印 term_coeff（
 
 `versionCode=35` 起，管理器「执行」默认会在校验成功后自动安排卸载。矩阵的原厂态准备与并发恢复使用 `action.sh --restore-only`，避免 T2/T9 用例意外排入删除。下方 2026-10-06 记录属于旧版两步流程，保留作历史证据；新版一键流程的失败注入见 `host/test_scripts.py`。
 
+`versionCode=36` 起，恢复断言使用本次 `restore_target`（`restore_target_mv` 文件），并要求 `restore_pending=no`，不再将历史 `adsp_orig.txt` 当作期望值。设备动作返回非零会直接计为失败，重启后也重新读取本次目标。
+
 | ID | 场景 | 断言 | 耗时 |
 |---|---|---|---|
 | T7.2 | 卸载 + 软重启 | 模块清理完备（`module_loaded==0`）；**`vbat_uv` 仅观察** | ~3 min |

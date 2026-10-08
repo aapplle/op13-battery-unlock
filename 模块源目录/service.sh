@@ -12,8 +12,6 @@ MODDIR=${0%/*}
 
 P=/sys/module/uv2800/parameters
 BK=/data/adb/uv2800_backup                     # 备份目录放在模块【外】，卸载后仍存在
-XML=/data/system/oplus_devicepolicy_data_customize.xml
-KEY=oplus_diable_super_power_saving_mode
 TARGET_MV_DEFAULT=2800
 FLOOR_MV=3060
 CS=/sys/class/oplus_chg/battery/chip_soc
@@ -30,11 +28,21 @@ if [ -e "$MODDIR/remove" ]; then
     exit 0
 fi
 klog() { uv_log "$@"; }
+uv_log_sep "service.sh 开始（KSU_LATE_LOAD=$KSU_LATE_LOAD）"
 
-# 原值备份统一入口
-# 【为什么必须判据】曾实测到 adsp_orig.txt 被备份成 2600（解耦目标）/2800（hook 污染值），
-# 导致 action.sh 回写把 2800 当"原值"写回（真原值 3250）—— 备份一旦被污染，
-# 之后所有恢复路径都会跟着用错值。
+# 恢复意图优先于所有加载、捕获和参数写入。全部成功条件由同一入口负责。
+if [ -f "$BK/skip" ]; then
+    if uv_restore_all "$P"; then
+        klog "启动恢复完成：${UV_RESTORE_TARGET} mV 已通过全部实时检查"
+        exit 0
+    else
+        _restore_rc=$?
+        klog "启动恢复未完成：${UV_RESTORE_ERROR:-共享恢复入口失败}；保留待恢复状态"
+        exit "$_restore_rc"
+    fi
+fi
+
+# 首次写入前的诊断快照。恢复目标由共享入口实时查 DT，不使用该历史快照兜底。
 # 【判据】原值必须大于 FLOOR(3060)：模块可写 ADSP 范围是 [2540, 3060]，
 # 所以 _v <= 3060 说明 ADSP 可能被本模块（在任何 V_S 下）改写过，此时【拒绝备份】。
 # 误拒安全（DT 兜底结果相同），误接受危险（固化错误值）。
@@ -61,7 +69,7 @@ backup_orig() {
     return 0
 }
 
-uv_log_sep "service.sh 开始（KSU_LATE_LOAD=$KSU_LATE_LOAD）"
+
 
 # flock 串行化本次完整操作；不再按进程名杀掉其它实例。
 
@@ -83,7 +91,6 @@ fi
 
 mkdir -p "$BK" || exit 1
 _status=0
-_restore_verified=0
 
 # --- 1.6) ★ 自动捕获 uv_dev ----------------------------------------
 # 【为什么】uv_dev 只能由 oplus_fg_get_deep_term_volt 入口捕获，而该函数
@@ -142,44 +149,7 @@ klog "关机电压 V_s=${V_S} mV，ADSP 派生=${ADSP_TARGET} mV（偏移 ${_off
 
 
 
-if [ -f "$BK/skip" ]; then
-    # skip 是恢复意图；restore_pending 存在表示本次尚未实时验证完成。
-    touch "$BK/restore_pending" || exit 1
-    rm -f "$BK/adsp_state" || exit 1
-    _orig=$(cat "$BK/adsp_orig.txt" 2>/dev/null | tr -d "[:space:]")
-    case "$_orig" in ''|*[!0-9]*) _orig="" ;; esac
-    if [ -z "$_orig" ] || [ "$_orig" -lt 3000 ] 2>/dev/null || [ "$_orig" -gt 5000 ] 2>/dev/null; then
-        _orig=$(uv_dt_orig) || _orig=""
-        if [ -n "$_orig" ]; then
-            echo "$_orig" > "$BK/adsp_orig.txt" || exit 1
-        fi
-    fi
-    if [ -n "$_orig" ] && uv_set_targets "$_orig" "$_orig" "$P"; then
-        # 指针未捕获也必须先同步两个 hook，避免后续厂商 setter 继续写解耦值。
-        _cur=$(uv_read_adsp "$P") || _cur=""
-        if [ -n "$_cur" ]; then
-            if [ "$_cur" != "$_orig" ] && ! echo "$_orig" > "$P/adsp_write"; then
-                klog "错误：原厂 ADSP 回写失败，保留恢复待办"
-                _status=1
-            fi
-            _rb=$(uv_read_adsp "$P") || _rb=""
-            if [ "$_status" = 0 ] && [ "$_rb" = "$_orig" ]; then
-                echo "$_orig" > "$BK/adsp_state" || exit 1
-                _restore_verified=1
-                klog "已实时验证 ADSP 恢复为原厂 ${_orig} mV"
-            else
-                klog "错误：原厂 ADSP 校验失败（读回 ${_rb:-未知}，目标 $_orig），保留恢复待办"
-                _status=1
-            fi
-        else
-            klog "错误：ADSP 读取失败，两个 hook 已设原厂值；保留恢复待办，下次启动重试"
-            _status=1
-        fi
-    else
-        klog "错误：原厂值计算或 hook 参数设置失败，保留恢复待办"
-        _status=1
-    fi
-elif [ -f "$BK/no_adsp_write" ]; then
+if [ -f "$BK/no_adsp_write" ]; then
     klog "检测到 no_adsp_write 标记，本次不写电量计终止电压（测试用）"
 else
     rm -f "$BK/uninstall_verified" || exit 1
@@ -241,10 +211,6 @@ if [ -f "$BK/no_real_soc" ]; then
     # no_real_soc 语义 = 恢复官方平滑电量 —— 主动解绑，不仅"不绑定"。
     uv_unbind_capacity "$CAP" "$CAPUE"
     klog "检测到 no_real_soc 标记，已解绑真实电量显示"
-elif [ -f "$BK/skip" ]; then
-    # skip 语义 = 完全恢复原厂 —— 主动解绑 capacity，不仅"不绑定"。
-    uv_unbind_capacity "$CAP" "$CAPUE"
-    klog "检测到 skip 标记（已手动恢复），已解绑真实电量显示"
 elif [ -e "$CS" ] && [ -e "$CAP" ]; then
     uv_unbind_capacity "$CAP" "$CAPUE"
     bound=0
@@ -267,68 +233,26 @@ elif [ -e "$CS" ] && [ -e "$CAP" ]; then
     fi
 fi
 
-# --- 4) 禁止低电量强制进入超级省电 ------------------------------------
-# 原理：com.oplus.battery 的 Utils.isSuperPowerSaveDisabled() 读这个设备策略；
-#       true 时低电量强制对话框不再弹出、设置入口隐藏。
-# 服务端 checkPermission() 要求 appId==1000 -> 必须 su 1000。
-if [ -f "$BK/skip" ]; then
-    # skip 语义 = 完全恢复原厂 —— 主动恢复设备策略，不仅"不应用"。
-    # 手动 touch skip 或重装带旧 skip 时，action.sh 的策略恢复可能未执行，
-    # 这里兜底确保策略被恢复。
-    if [ -f "$BK/orig_state" ]; then
-        if [ "$(cat "$BK/orig_state" 2>/dev/null)" = "existed" ]; then
-            if [ -f "$BK/devicepolicy_orig.xml" ]; then
-                cp -f "$BK/devicepolicy_orig.xml" "$XML" || _status=1
-                chown system:system "$XML" 2>/dev/null
-                chmod 600 "$XML" 2>/dev/null
-            else
-                # 原文件存在但备份丢失 → 不动文件，报警
-                klog "⚠️ 设备策略备份丢失（orig_state=existed 但 devicepolicy_orig.xml 不存在），保留当前文件"
-                _status=1
-            fi
-        else
-            rm -f "$XML" || _status=1
-        fi
+# --- 4) 禁止低电量强制进入超级省电 ------------------------------
+# 策略库只管理本模块的目标键并严格读回；这里仅负责有界等待服务就绪。
+i=0; _policy_ready=0
+while [ "$i" -lt 60 ]; do
+    if uv_policy_read >/dev/null 2>&1; then
+        _policy_ready=1
+        break
     fi
-    su 1000 -c "service call oplusdevicepolicy 1 s16 $KEY s16 false i32 1" >/dev/null 2>&1 || _status=1
-    rm -f "$BK/applied"
-    klog "检测到 skip 标记（已手动恢复），已恢复设备策略"
-    klog "若要重新自动应用，请 rm $BK/skip"
-else
-    if [ ! -f "$BK/applied" ]; then
-        if [ -f "$XML" ]; then
-            cp -f "$XML" "$BK/devicepolicy_orig.xml" || exit 1
-            echo "existed" > "$BK/orig_state"
-        else
-            echo "absent" > "$BK/orig_state"
-        fi
-        touch "$BK/applied"
-        klog "已备份设备策略原文件（原状态: $(cat "$BK/orig_state")）"
-    fi
-
-    i=0; ok=0
-    while [ $i -lt 60 ]; do
-        OUT=$(su 1000 -c "service call oplusdevicepolicy 4 s16 $KEY i32 1" 2>&1)
-        case "$OUT" in
-            *Parcel*) ok=1; break ;;
-            *"Transaction too large"*)
-                klog "⚠️ oplusdevicepolicy 出现 Transaction too large（/data/system 下策略 XML 堆积）"
-                klog "   请将本日志反馈作者；本次跳过设备策略，不影响其他功能"
-                ok=-1; _status=1; break ;;
-        esac
-        sleep 1
-        i=$((i+1))
-    done
-    if [ "$ok" = "1" ]; then
-        su 1000 -c "service call oplusdevicepolicy 1 s16 $KEY s16 true i32 1" >/dev/null 2>&1 || _status=1
-        klog "设备策略 $KEY=true（waited ${i}s）"
-    elif [ "$ok" = "0" ]; then
-        klog "⚠️ 等待 oplusdevicepolicy 服务超时（60s），设备策略未应用（下次开机重试）"
+    sleep 1
+    i=$((i+1))
+done
+if [ "$_policy_ready" = 1 ]; then
+    if uv_policy_apply; then
+        klog "设备策略已应用并读回确认（waited ${i}s）"
+    else
+        klog "错误：设备策略应用或读回失败，下次启动重试"
         _status=1
     fi
-fi
-
-if [ "$_restore_verified" = 1 ] && [ "$_status" = 0 ]; then
-    rm -f "$BK/restore_pending" || exit 1
+else
+    klog "错误：等待设备策略服务超时（60s），未应用策略"
+    _status=1
 fi
 exit "$_status"

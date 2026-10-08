@@ -89,10 +89,10 @@ if refresh_route; then exit 1; fi
     def test_each_factory_case_sets_up_its_own_state(self):
         result = self.shell('''
 snap() {
-  S=([ts]=1 [adsp_orig]=3250 [param_resume]=0)
+  S=([ts]=1 [adsp_orig]=3150 [param_resume]=0 [restore_target]=3330 [restore_pending]=no)
   if [ "$STATE" = factory ]; then
-    S[skip]=yes; S[param_target]=3250; S[adsp_read]=3250
-    S[adsp_state]=3250; S[vbat_uv]=3250; S[bind_layers]=0
+    S[skip]=yes; S[param_target]=3330; S[param_adsp]=3330; S[adsp_read]=3330
+    S[adsp_state]=3330; S[vbat_uv]=3330; S[bind_layers]=0
   else
     S[skip]=no; S[param_target]=2800; S[adsp_read]=2540
     S[adsp_state]=2540; S[vbat_uv]=2800; S[bind_layers]=1
@@ -106,6 +106,86 @@ for n in 1 2 3 4 5; do
 done
 ''')
         self.assert_shell_ok(result)
+
+    def test_pending_restore_does_not_pass_even_when_action_returns_zero(self):
+        result = self.shell('''
+CALLS=0
+snap() {
+  S=([skip]=yes [restore_pending]=yes [restore_target]=3330 [param_target]=3330
+     [param_adsp]=3330 [adsp_read]=3330 [adsp_state]=3330 [vbat_uv]=3330 [param_resume]=0 [bind_layers]=0)
+}
+apply_dev() { CALLS=$((CALLS+1)); return 0; }
+snap
+if ensure_factory; then exit 1; fi
+[ "$CALLS" = 1 ] && [ "$CASE_FAILED" = 1 ]
+''')
+        self.assert_shell_ok(result)
+
+    def test_failed_factory_action_cannot_reuse_previous_success(self):
+        result = self.shell('''
+S=([skip]=yes [restore_pending]=no [restore_target]=3330)
+sh_dev() { return 37; }
+apply_dev factory
+rc=$?
+[ "$rc" = 37 ] || exit 1
+if ensure_factory; then exit 1; fi
+[ "$CASE_FAILED" = 1 ]
+''')
+        self.assert_shell_ok(result)
+
+    def test_reboot_cases_use_post_boot_restore_target(self):
+        result = self.shell('''
+snap() {
+  S=([ts]=1 [adsp_orig]=3150 [restore_target]="$TARGET" [restore_pending]=no [skip]=yes
+     [param_target]="$TARGET" [param_adsp]="$TARGET" [adsp_read]="$TARGET" [adsp_state]="$TARGET"
+     [vbat_uv]="$TARGET" [param_resume]=0 [bind_layers]=0)
+}
+ensure_decouple() { return 0; }
+apply_dev() { TARGET=3100; return 0; }
+soft_reboot() { TARGET=3330; return 0; }
+hard_reboot_jailbreak() { TARGET=3330; return 0; }
+sh_dev() { return 0; }
+for id in T3.2 T4.2 T5.1; do
+  TARGET=3100; PASS=0; FAIL=0; WANT=("$id")
+  "t_${id//./_}"
+  [ "$PASS" = 1 ] && [ "$FAIL" = 0 ] && [ "${S[restore_target]}" = 3330 ] || exit 1
+done
+''')
+        self.assert_shell_ok(result)
+
+    def test_invalid_restore_target_does_not_pass_with_cleared_pending(self):
+        result = self.shell('''
+S=([skip]=yes [restore_pending]=no [restore_target]=2500 [param_target]=2500
+   [param_adsp]=2500 [adsp_read]=2500 [adsp_state]=2500 [vbat_uv]=2500 [param_resume]=0 [bind_layers]=0)
+if assert_factory_completed; then exit 1; fi
+[ "$CASE_FAILED" = 1 ]
+''')
+        self.assert_shell_ok(result)
+
+    def test_device_apply_propagates_action_and_service_exit_status(self):
+        bash = bash_path()
+        if not bash:
+            self.skipTest("bash is required")
+        with tempfile.TemporaryDirectory(prefix="uv-apply-") as directory:
+            root = Path(directory)
+            backup, module, logs = root / "backup", root / "module", root / "logs"
+            for path in (backup, module, logs):
+                path.mkdir()
+            (module / "service.sh").write_text("exit 17\n", encoding="utf-8")
+            (module / "action.sh").write_text("exit 23\n", encoding="utf-8")
+            source = (ROOT / "自动化测试矩阵/dev/apply.sh").read_text(encoding="utf-8")
+            source = source.replace("BK=/data/adb/uv2800_backup", f'BK="{backup.as_posix()}"')
+            source = source.replace("M=/data/adb/modules/uv2800", f'M="{module.as_posix()}"')
+            source = source.replace("/data/local/tmp/uvtest/last_service.log", f'"{(logs / "last_service.log").as_posix()}"')
+            source = source.replace("/data/local/tmp/uvtest/last_action.log", f'"{(logs / "last_action.log").as_posix()}"')
+            script = root / "apply.sh"
+            script.write_text(source, encoding="utf-8", newline="\n")
+            for operation, expected in (("factory", 23), ("decouple", 17), ("target", 17)):
+                with self.subTest(operation=operation):
+                    result = subprocess.run([bash, str(script), operation, "2800"],
+                                            capture_output=True, encoding="utf-8", timeout=10)
+                    self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+                    self.assertIn(f"rc={expected}", result.stdout)
 
     def test_fetch_failure_does_not_report_ready(self):
         result = self.shell('''

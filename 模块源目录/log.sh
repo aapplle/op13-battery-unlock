@@ -117,7 +117,7 @@ uv_previous_uninstall() {
     _up_v=$(cat "$UV_BK/uninstall_verified" 2>/dev/null) || return 1
     case "$_up_v" in ''|*[!0-9]*) return 1 ;; esac
     [ "$_up_v" -ge 2000 ] 2>/dev/null && [ "$_up_v" -le 5000 ] 2>/dev/null || return 1
-    [ "$(cat "$UV_BK/adsp_orig.txt" 2>/dev/null)" = "$_up_v" ] || return 1
+    [ "$(cat "$UV_BK/restore_target_mv" 2>/dev/null)" = "$_up_v" ] || return 1
     echo "$_up_v"
 }
 
@@ -484,3 +484,9 @@ uv_unbind_capacity() {
     [ "$_un" -gt 0 ] && echo change > "$_CAPUE" 2>/dev/null
     return $_un
 }
+
+# Function libraries only; sourcing does not change device state.
+if [ -n "${MODDIR:-}" ]; then
+    [ -f "$MODDIR/policy.sh" ] && . "$MODDIR/policy.sh"
+    [ -f "$MODDIR/restore.sh" ] && . "$MODDIR/restore.sh"
+fi
