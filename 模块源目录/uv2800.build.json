@@ -1,13 +1,13 @@
 {
   "schema": 2,
   "inputs_sha256": {
-    "内核源码/uv2800.c": "b91b66dcf0b951585670fffe5138a1778969ae5a67cdfdaf19836ad8b757e0a7",
+    "内核源码/uv2800.c": "807727670928717c3a30e97864dabc15734cfb54c2949fe6f6d75fb6b5a473d6",
     "内核源码/Makefile": "011515ff4fb8cbbeb649d82ed4ac82cdacc8e00e650d969946a4fda264025d62",
     "编译前置/device_config": "cb3d632ed0e4734d06d75e8e47636fb58f9959a011b35c65f59beeac22a438ab",
     "编译前置/Module.symvers": "26a23b356216738eb5d33c77e61d373febe4175a4b83de214cb192ae37082fc9",
     "自动化测试矩阵/host/kernel_dependencies.py": "e2b8ebba6bef15b79e6d6634307fe520b79950ff2ba99d0d49feafd0f541e3b4"
   },
-  "module_sha256": "822cb9492664dabd9b08bda6a25858a81bac48043b01dce58bc828acbacd505f",
+  "module_sha256": "77fc7c7879c3b6e4e0869092a4c12f83030e50cebb91628bcce39db8ab145056",
   "abi": {
     "machine": "AArch64",
     "this_module_size": 1536,
