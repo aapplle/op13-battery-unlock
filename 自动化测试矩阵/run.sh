@@ -127,9 +127,21 @@ sh_dev() {
   local f="$1"; shift
   local b; b="$(basename "$f")"
   if [ "${PUSHED:-0}" != "1" ]; then
-    timeout 30 adb -s "$DEV" push "$f" "$DEV_TMP/$b" >/dev/null 2>&1 || return 1
+    dev_push "$f" "$DEV_TMP/$b" || return 1
   fi
   timeout 60 adb -s "$DEV" shell "su -c 'sh $DEV_TMP/$b $*'" 2>&1
+}
+
+# Windows Git Bash (MSYS2) 会把以 / 开头的远端参数改写成 C:/Program Files/Git/…
+# 导致 adb push 的设备路径失效；但禁用转换（MSYS_NO_PATHCONV=1）后，本地侧的
+# MSYS 绝对路径（/e/…）原生 adb.exe 又无法 stat。因此本地路径用 cygpath 显式转成
+# Windows 形式，远端路径靠 MSYS_NO_PATHCONV 保持原样。
+# Linux/WSL 无 cygpath，本地路径原样传递，行为不变。
+# （adb shell 里的远端路径不受 MSYS 改写影响，无需同样处理。）
+dev_push() {
+  local src="$1" dst="$2"
+  command -v cygpath >/dev/null 2>&1 && src="$(cygpath -w "$src")"
+  MSYS_NO_PATHCONV=1 timeout 30 adb -s "$DEV" push "$src" "$dst" >/dev/null 2>&1
 }
 
 # ---------------- 快照与断言 ----------------
@@ -137,6 +149,7 @@ snap() {
   local raw k v
   S=()   # 读取失败也必须丢弃前次快照，避免断言使用旧状态。
   raw="$(sh_dev "$DEV_DIR/snap.sh")" || { collection_failed "snap 读取失败"; return 1; }
+  raw="${raw//$'\r'/}"   # adb shell 在 Windows 上输出 CRLF；不剥离会把每个值都带上 \r
   while IFS='=' read -r k v; do
     [ -n "$k" ] && S["$k"]="$v"
   done <<< "$raw"
@@ -199,7 +212,7 @@ ensure_module() {
     say "模块未安装 → 从 zip 安装（被测版本）"
     [ -f "$ZIP" ] || { echo "✗ 找不到 zip: $ZIP（用 UV_ZIP 指定）"; exit 2; }
     echo "    zip: $ZIP  ($(stat -c%s "$ZIP" 2>/dev/null) B)"
-    timeout 60 adb -s "$DEV" push "$ZIP" "$DEV_TMP/module.zip" >/dev/null 2>&1 || { echo "✗ zip 推送失败"; exit 2; }
+    dev_push "$ZIP" "$DEV_TMP/module.zip" || { echo "✗ zip 推送失败"; exit 2; }
     local out
     out="$(timeout 120 adb -s "$DEV" shell "su -c '/data/adb/ksu/bin/ksud module install $DEV_TMP/module.zip'" 2>&1)"
     echo "$out" | grep -v "^$" | sed "s/^/    /"
@@ -287,6 +300,7 @@ race_snap() {
   local raw k v
   R=()
   raw="$(sh_dev "$DEV_DIR/racesnap.sh")" || { collection_failed "racesnap 读取失败"; return 1; }
+  raw="${raw//$'\r'/}"   # 与 snap() 同理：剥离 Windows adb shell 的 CRLF
   while IFS='=' read -r k v; do
     [ -n "$k" ] && R["$k"]="$v"
   done <<< "$raw"
@@ -308,6 +322,7 @@ refresh_route() {
     return 0
   fi
   raw="$(sh_dev "$DEV_DIR/route.sh")" || { collection_failed "route.sh 采集失败"; return 1; }
+  raw="${raw//$'\r'/}"   # 与 snap() 同理：剥离 Windows adb shell 的 CRLF
   while IFS='=' read -r k v; do
     if [ -n "$k" ]; then DV["$k"]="$v"; ROUTE_KEYS+=("$k"); fi
   done <<< "$raw"
@@ -1046,7 +1061,7 @@ main() {
   adb -s "$DEV" shell "su -c 'chmod 777 $DEV_TMP'" >/dev/null 2>&1
   local f pushfail=0
   for f in snap.sh apply.sh logtail.sh softreboot.sh touchskip.sh rmmod_only.sh devver.sh racesnap.sh concurrent.sh route.sh; do
-    if ! timeout 30 adb -s "$DEV" push "$DEV_DIR/$f" "$DEV_TMP/$f" >/dev/null 2>&1; then
+    if ! dev_push "$DEV_DIR/$f" "$DEV_TMP/$f"; then
       echo "✗ 推送失败: $f → $DEV_TMP"; pushfail=1
     fi
   done
@@ -1058,6 +1073,7 @@ main() {
   # P2-14：采集设备/内核/驱动版本戳（写入 report.json / report.md）
   local _dv
   _dv="$(sh_dev "$DEV_DIR/devver.sh" 2>/dev/null)"
+  _dv="${_dv//$'\r'/}"   # 与 snap() 同理：剥离 Windows adb shell 的 CRLF
   if [ -n "$_dv" ]; then
     while IFS='=' read -r _k _v; do
       [ -n "$_k" ] && DV["$_k"]="$_v"

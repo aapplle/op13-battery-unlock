@@ -408,6 +408,8 @@ static int uv_adsp_write_set(const char *val, const struct kernel_param *kp)
 		rc = uv_call_setter_val(dev, v, fn);
 	WRITE_ONCE(uv_write_task, NULL);
 	pr_info("uv2800: [adsp_write] 写 %d mV，返回 %d\n", v, rc);
+	/* setter 成功返回 0（真机实测），失败是负 errno；正返回值无证据支持，
+	 * 但按内核约定不应视为成功 —— 保持与 errno 语义一致的判定。*/
 	if (rc)
 		return rc < 0 ? rc : -EIO;
 	uv_adsp_write_val = v;
@@ -466,8 +468,17 @@ static int uv_adsp_read_set(const char *val, const struct kernel_param *kp)
 	WRITE_ONCE(uv_read_task, NULL);
 	if (uv_adsp_debug)
 		pr_info("uv2800: 直读 ADSP deep_term_volt = %d mV (rc=%d)\n", out, rc);
-	if (rc)
-		return rc < 0 ? rc : -EIO;
+	/* 【返回值语义】真机（C17/PJZ110 实测）getter 成功时返回的是电压本身
+	 * （正值，rc == out == 3060/2540），失败才是负 errno —— 内核约定里正返回
+	 * 值从来不是错误码。setter 则相反，成功返回 0（实测「写 3060 mV，返回 0」），
+	 * 两者判定不能共用一套。这里只把负值当失败，并用 out 的物理区间兜底
+	 * （getter 失败时常不写 out → 保持 0），与 log.sh uv_read_adsp 的
+	 * 2000~5000 校验口径一致。曾按 errno 语义判 rc>0 为失败，导致真机
+	 * adsp_read 永远 -EIO、恢复事务整体不可用（矩阵 15 连败的根因）。*/
+	if (rc < 0)
+		return rc;
+	if (out < 2000 || out > 5000)
+		return -EIO;
 	uv_adsp_raw = out;
 	return 0;
 }

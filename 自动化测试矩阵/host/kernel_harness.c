@@ -175,8 +175,9 @@ static int vendor_get(void *dev, int *out)
     assert(dev == &task_a);
     calls++; get_calls++;
     if (uv_hooks_ready) check_self_isolation(false);
+    /* 真机（C17/PJZ110）实测：getter 成功时返回电压本身（正数），失败才返回负 errno。 */
     *out = 3250;
-    return vendor_rc;
+    return vendor_rc < 0 ? vendor_rc : 3250;
 }
 static int vendor_set_val(void *dev, int value)
 {
@@ -189,6 +190,13 @@ static int vendor_set_val(void *dev, int value)
 static int vendor_set_ptr(void *dev, int *value)
 {
     return vendor_set_val(dev, *value);
+}
+/* getter 失败路径的另一种形态：不写 out（保持 0）却返回正数。 */
+static int vendor_get_zero(void *dev, int *out)
+{
+    (void)dev; (void)out;
+    calls++; get_calls++;
+    return 1;
 }
 
 static void test_registration(void)
@@ -250,6 +258,12 @@ static void test_adsp(int profile)
     vendor_rc = -EIO;
     assert(uv_adsp_write_set("3300", NULL) == -EIO && uv_last_volt == 3250 && !uv_write_task);
     assert(uv_adsp_read_set("1", NULL) == -EIO && uv_adsp_raw == 0 && !uv_read_task);
+    /* getter 无效读数（out 未写入保持 0，正返回值）也必须失败：物理区间兜底。 */
+    vendor_rc = 0;
+    assert(uv_adsp_read_set("1", NULL) == 0 && uv_adsp_raw == 3250);
+    uv_get_addr = vendor_get_zero;
+    assert(uv_adsp_read_set("1", NULL) == -EIO && uv_adsp_raw == 0);
+    uv_get_addr = vendor_get;
     assert(uv_adsp_write_set("0", NULL) == -EINVAL);
     assert(uv_adsp_write_set("1999", NULL) == -EINVAL);
     assert(uv_adsp_write_set("5001", NULL) == -EINVAL);
