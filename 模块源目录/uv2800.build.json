@@ -1,0 +1,83 @@
+{
+  "schema": 2,
+  "inputs_sha256": {
+    "内核源码/uv2800.c": "b91b66dcf0b951585670fffe5138a1778969ae5a67cdfdaf19836ad8b757e0a7",
+    "内核源码/Makefile": "011515ff4fb8cbbeb649d82ed4ac82cdacc8e00e650d969946a4fda264025d62",
+    "编译前置/device_config": "cb3d632ed0e4734d06d75e8e47636fb58f9959a011b35c65f59beeac22a438ab",
+    "编译前置/Module.symvers": "26a23b356216738eb5d33c77e61d373febe4175a4b83de214cb192ae37082fc9",
+    "自动化测试矩阵/host/kernel_dependencies.py": "e2b8ebba6bef15b79e6d6634307fe520b79950ff2ba99d0d49feafd0f541e3b4"
+  },
+  "module_sha256": "822cb9492664dabd9b08bda6a25858a81bac48043b01dce58bc828acbacd505f",
+  "abi": {
+    "machine": "AArch64",
+    "this_module_size": 1536,
+    "vermagic": "6.6.118-4k-g6028f47fadda SMP preempt mod_unload modversions aarch64"
+  },
+  "kernel": {
+    "commit": "6028f47faddaa27700f8dd3a1d83906ea8f27170",
+    "config_sha256": "ff0a7b2a8e52c5917d3a8ac0b3e7891e300b3b6789a36bdba3cfe449080337b3",
+    "symvers_sha256": "26a23b356216738eb5d33c77e61d373febe4175a4b83de214cb192ae37082fc9"
+  },
+  "compiler": "Ubuntu clang version 18.1.3 (1ubuntu1)",
+  "vendor": {
+    "repository": "https://github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8750.git",
+    "commit": "d50b305f7da9e14715a25120a4ac7b1a4b8b97c3",
+    "links": {
+      "drivers/android/oplus_binder": "vendor/oplus/kernel/ipc",
+      "drivers/base/kernelFwUpdate": "vendor/oplus/kernel/touchpanel/kernelFwUpdate",
+      "drivers/base/magtransfer": "vendor/oplus/kernel/device_info/magnetic_cover/magtransfer",
+      "drivers/base/touchpanel_notify": "vendor/oplus/kernel/touchpanel/touchpanel_notify",
+      "drivers/dma-buf/heaps/mm_boost_pool": "vendor/oplus/kernel/mm/mm_boost_pool",
+      "drivers/input/oplus_secure_drivers": "vendor/oplus/secure/common/bsp/drivers",
+      "drivers/misc/vibrator": "vendor/oplus/kernel/vibrator",
+      "drivers/power/oplus": "vendor/oplus/kernel/charger",
+      "drivers/soc/oplus/bluetooth": "vendor/oplus/kernel/bluetooth",
+      "drivers/soc/oplus/boot": "vendor/oplus/kernel/boot",
+      "drivers/soc/oplus/device_info": "vendor/oplus/kernel/device_info/device_info",
+      "drivers/soc/oplus/dfr": "vendor/oplus/kernel/dfr",
+      "drivers/soc/oplus/dft": "vendor/oplus/kernel/dft",
+      "drivers/soc/oplus/fpga_notify": "vendor/oplus/kernel/device_info/oplus_fpga/fpga_notify",
+      "drivers/soc/oplus/hans": "vendor/oplus/kernel/hans",
+      "drivers/soc/oplus/mdmrst": "vendor/oplus/hardware/radio/mdmrst/common",
+      "drivers/soc/oplus/midas": "vendor/oplus/kernel/cpu/midas",
+      "drivers/soc/oplus/multimedia": "vendor/oplus/kernel/multimedia/feedback/common",
+      "drivers/soc/oplus/oplus_trace_sensor": "vendor/oplus/sensor/kernel/oplus_trace_sensor",
+      "drivers/soc/oplus/osml_monitor": "vendor/oplus/kernel/cpu/sched/osml_monitor",
+      "drivers/soc/oplus/power": "vendor/oplus/kernel/power",
+      "drivers/soc/oplus/storage": "vendor/oplus/kernel/storage/storage_feature_in_module",
+      "drivers/soc/oplus/trackpoint": "vendor/qcom/opensource/display-drivers/oplus/common/trackpoint",
+      "include/linux/bwmon_geas.h": "vendor/oplus/kernel/cpu/geas/system/bwmon_geas.h",
+      "include/linux/cpufreq_bouncing.h": "vendor/oplus/kernel/cpu/cpufreq_bouncing/cpufreq_bouncing.h",
+      "include/linux/geas_ctrl.h": "vendor/oplus/kernel/cpu/game_opt/geas_ctrl.h",
+      "include/linux/oplus_omrg.h": "vendor/oplus/kernel/cpu/oplus_omrg/oplus_omrg.h",
+      "include/linux/pogo_common.h": "vendor/oplus/kernel/device_info/pogo_keyboard/pogo_common.h",
+      "include/linux/task_overload.h": "vendor/oplus/kernel/cpu/oplus_overload/task_overload.h",
+      "include/soc/oplus/boot": "vendor/oplus/kernel/boot/include",
+      "include/soc/oplus/device_info.h": "vendor/oplus/kernel/device_info/device_info/device_info.h",
+      "include/soc/oplus/dfr": "vendor/oplus/kernel/dfr/include",
+      "include/soc/oplus/dft": "vendor/oplus/kernel/dft/include",
+      "include/soc/oplus/fpga_notify.h": "vendor/oplus/kernel/device_info/oplus_fpga/fpga_notify/fpga_notify.h",
+      "include/soc/oplus/kernelFwUpdate.h": "vendor/oplus/kernel/touchpanel/kernelFwUpdate/kernelFwUpdate.h",
+      "include/soc/oplus/magcvr_notify.h": "vendor/oplus/kernel/device_info/magnetic_cover/magtransfer/magcvr_notify.h",
+      "include/soc/oplus/oplus_mm_kevent_fb.h": "vendor/oplus/kernel/multimedia/feedback/common/oplus_mm_kevent_fb.h",
+      "include/soc/oplus/oplus_trackpoint_report.h": "vendor/qcom/opensource/display-drivers/oplus/common/trackpoint/oplus_trackpoint_report.h",
+      "include/soc/oplus/system/kernel_fb.h": "vendor/oplus/kernel/dft/include/kernel_fb.h",
+      "include/soc/oplus/system/olc.h": "vendor/oplus/kernel/dft/include/olc.h",
+      "include/soc/oplus/system/oplus_trace_sensor.h": "vendor/oplus/sensor/kernel/oplus_trace_sensor/oplus_trace_sensor.h",
+      "include/soc/oplus/touchpanel_event_notify.h": "vendor/oplus/kernel/touchpanel/touchpanel_notify/touchpanel_event_notify.h",
+      "include/soc/oplus/ufs-oplus-dbg.h": "vendor/oplus/kernel/storage/storage_feature_in_module/common/ufs_oplus_dbg/ufs-oplus-dbg.h",
+      "include/trace/events/oplus_omrg_trace.h": "vendor/oplus/kernel/cpu/oplus_omrg/oplus_omrg_trace.h",
+      "kernel/locking/locking_main.h": "vendor/oplus/kernel/synchronize/oplus_locking.h",
+      "kernel/locking/oplus_locking": "vendor/oplus/kernel/synchronize",
+      "kernel/locking/oplus_locking.c": "vendor/oplus/kernel/synchronize/oplus_locking.c",
+      "kernel/locking/sa_common_struct.h": "vendor/oplus/kernel/cpu/sched/sched_assist/sa_common_struct.h",
+      "kernel/oplus_cpu": "vendor/oplus/kernel/cpu",
+      "mm/mm_osvelte": "vendor/oplus/kernel/mm/mm_osvelte",
+      "drivers/soc/oplus/storage/common/io_metrics": "vendor/oplus/kernel/storage/common/io_metrics"
+    },
+    "extra_links": {
+      "drivers/soc/oplus/storage/common/io_metrics": "vendor/oplus/kernel/storage/common/io_metrics"
+    },
+    "links_sha256": "5f066ddbc1c1c95aa392191d1ea19b27f8302d0af26b7e0fcbb44e0164638b27"
+  }
+}
