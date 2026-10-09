@@ -44,11 +44,29 @@ jobs:
       - name: 宿主回归（无需手机）
         run: python3 -m unittest discover -s 自动化测试矩阵/host -p 'test_*.py' -v 2>&1 | tee ci-logs/host-tests.log
 
+      # 缓存固定提交的内核树 + modules_prepare 产物。
+      # 命中时跳过 GB 级 fetch 和数分钟的 modules_prepare；未命中走原全量路径。
+      # prepare-kernel.sh 对已就绪的树幂等：modules_prepare 重跑几乎零成本。
+      - name: 恢复内核树缓存（固定提交）
+        uses: actions/cache/restore@v4
+        with:
+          path: 编译用内核树
+          key: kernel-6028f47faddaa27700f8dd3a1d83906ea8f27170-v2
+          restore-keys: |
+            kernel-6028f47faddaa27700f8dd3a1d83906ea8f27170-
+
       - name: 拉取固定提交的内核和必要 OEM 子树
         run: bash fetch-kernel.sh 2>&1 | tee ci-logs/fetch-kernel.log
 
       - name: 配置内核并准备外部模块构建
         run: bash 自动化测试矩阵/prepare-kernel.sh 2>&1 | tee ci-logs/prepare-kernel.log
+
+      - name: 保存内核树缓存（仅主分支/tag）
+        if: github.event_name == 'push'
+        uses: actions/cache/save@v4
+        with:
+          path: 编译用内核树
+          key: kernel-6028f47faddaa27700f8dd3a1d83906ea8f27170-v2-${{ github.run_id }}
 
       - name: 从当前源码编译、验证并打包
         run: |
