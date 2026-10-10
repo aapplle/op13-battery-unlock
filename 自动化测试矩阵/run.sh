@@ -113,6 +113,16 @@ wait_dev() {
   done
   return 1
 }
+# 短等待：adb 瞬时抖动（软重启重枚举 / USB 抖动）通常几秒内恢复，
+# 采集重试前先等它回来，避免每次重试都白跑一次 60s 超时。
+wait_adb() {
+  local i
+  for i in 1 2 3 4 5; do
+    adb devices | awk 'NR>1 && $2=="device"{print $1}' | grep -qx "$DEV" && return 0
+    sleep 2
+  done
+  return 1
+}
 wait_boot() {
   for i in $(seq 1 60); do
     [ "$(adbs shell getprop sys.boot_completed | tr -d '\r')" = "1" ] && return 0
@@ -146,9 +156,18 @@ dev_push() {
 
 # ---------------- 快照与断言 ----------------
 snap() {
-  local raw k v
+  local raw k v attempt
   S=()   # 读取失败也必须丢弃前次快照，避免断言使用旧状态。
-  raw="$(sh_dev "$DEV_DIR/snap.sh")" || { collection_failed "snap 读取失败"; return 1; }
+  # 矩阵一次跑几十次软/硬重启，adb 重枚举窗口里的读取会瞬时失败；
+  # 重试（含短等待）拿到的是【本次】新读数，不弱化任何断言。
+  raw=""
+  for attempt in 1 2 3; do
+    if raw="$(sh_dev "$DEV_DIR/snap.sh" 2>/dev/null)" && printf '%s' "$raw" | grep -q '^ts='; then break; fi
+    raw=""
+    wait_adb || true
+    sleep 1
+  done
+  [ -n "$raw" ] || { collection_failed "snap 读取失败"; return 1; }
   raw="${raw//$'\r'/}"   # adb shell 在 Windows 上输出 CRLF；不剥离会把每个值都带上 \r
   while IFS='=' read -r k v; do
     [ -n "$k" ] && S["$k"]="$v"
@@ -297,9 +316,16 @@ derived_adsp() {
 
 # T9：竞态/残留快照（模块唯一性 / 残留进程 / 僵尸 / 状态一致性）
 race_snap() {
-  local raw k v
+  local raw k v attempt
   R=()
-  raw="$(sh_dev "$DEV_DIR/racesnap.sh")" || { collection_failed "racesnap 读取失败"; return 1; }
+  raw=""
+  for attempt in 1 2 3; do
+    if raw="$(sh_dev "$DEV_DIR/racesnap.sh" 2>/dev/null)" && printf '%s' "$raw" | grep -q '^mods='; then break; fi
+    raw=""
+    wait_adb || true
+    sleep 1
+  done
+  [ -n "$raw" ] || { collection_failed "racesnap 读取失败"; return 1; }
   raw="${raw//$'\r'/}"   # 与 snap() 同理：剥离 Windows adb shell 的 CRLF
   while IFS='=' read -r k v; do
     [ -n "$k" ] && R["$k"]="$v"
@@ -437,6 +463,13 @@ want() {  # want <用例ID> —— 在 case_begin 之前调用，未选中则完
 apply_dev() {
   local rc=0
   sh_dev "$DEV_DIR/apply.sh" "$@" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    # apply 走设备端 service.sh/action.sh（各含秒级工作），失败常见于 adb 抖动；
+    # 设备动作均幂等，重试一次不改变语义。
+    wait_adb || true
+    sleep 1
+    sh_dev "$DEV_DIR/apply.sh" "$@" || rc=$?
+  fi
   [ "$rc" -eq 0 ] || bad "设备动作 $1 失败（rc=$rc）"
   return "$rc"
 }
