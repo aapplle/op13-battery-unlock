@@ -61,6 +61,8 @@ class RunnerTests(unittest.TestCase):
         result = self.shell('''
 S=([ts]=old [vbat_uv]=2800 [param_resume]=0)
 sh_dev() { return 1; }
+wait_adb() { return 1; }   # 采集重试依赖的恢复等待：桩掉保持测试快速且确定
+sleep() { :; }
 t_T1_2
 [ "$FAIL" = 1 ] && [ "$PASS" = 0 ] && [ "${#S[@]}" = 0 ]
 ''')
@@ -70,6 +72,8 @@ t_T1_2
         result = self.shell('''
 S=([ts]=old [param_target]=2800)
 sh_dev() { return 1; }
+wait_adb() { return 1; }
+sleep() { :; }
 if wait_key param_target 2800 1; then exit 1; fi
 [ "$CASE_FAILED" = 1 ] && [ "${#S[@]}" = 0 ]
 ''')
@@ -125,6 +129,8 @@ if ensure_factory; then exit 1; fi
         result = self.shell('''
 S=([skip]=yes [restore_pending]=no [restore_target]=3330)
 sh_dev() { return 37; }
+wait_adb() { return 1; }   # apply_dev 重试的恢复等待：桩掉保持确定
+sleep() { :; }
 apply_dev factory
 rc=$?
 [ "$rc" = 37 ] || exit 1

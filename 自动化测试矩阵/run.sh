@@ -116,6 +116,7 @@ wait_dev() {
 # 短等待：adb 瞬时抖动（软重启重枚举 / USB 抖动）通常几秒内恢复，
 # 采集重试前先等它回来，避免每次重试都白跑一次 60s 超时。
 wait_adb() {
+  command -v adb >/dev/null 2>&1 || return 1
   local i
   for i in 1 2 3 4 5; do
     adb devices | awk 'NR>1 && $2=="device"{print $1}' | grep -qx "$DEV" && return 0
