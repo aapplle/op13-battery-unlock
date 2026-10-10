@@ -579,6 +579,63 @@ uv_lock && echo "selected=$UV_FLOCK"
                                 env=env, capture_output=True, timeout=5)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_lock_falls_back_to_fd0_when_fd9_is_ebadf(self):
+        """C17 adb-su 上下文：fd 9 未被子进程继承（EBADF），fd 0 必然继承。"""
+        helper = self.lock_source()
+        env = dict(os.environ, FAKE_ROOT=self.root.as_posix())
+        code = r'''
+. "$1"
+flock() {
+    case "$2" in
+        9) echo "flock: Bad file descriptor" >&2; return 1 ;;
+        0) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+sleep() { :; }
+uv_lock && echo locked-via-fd0
+[ ! -e "$FAKE_ROOT/.lockprobe" ] && echo probe-cleaned
+'''
+        result = subprocess.run([BASH, "-c", code, "test", helper.as_posix()],
+                                env=env, capture_output=True, text=True,
+                                encoding="utf-8", timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("locked-via-fd0", result.stdout)
+        self.assertIn("probe-cleaned", result.stdout)
+
+    def test_lock_fails_fast_when_fd0_also_rejects(self):
+        """降级路径的 fd 0 也 EBADF 时必须立即失败，不能空转 90s。"""
+        helper = self.lock_source()
+        env = dict(os.environ, FAKE_ROOT=self.root.as_posix())
+        code = r'''
+. "$1"
+flock() {
+    case "$2" in
+        9|0) echo "flock: Bad file descriptor" >&2; return 1 ;;
+        *) return 1 ;;
+    esac
+}
+sleep() { :; }
+uv_lock; echo "rc=$?"
+'''
+        result = subprocess.run([BASH, "-c", code, "test", helper.as_posix()],
+                                env=env, capture_output=True, text=True,
+                                encoding="utf-8", timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("rc=1", result.stdout)
+        self.assertNotIn("90s", result.stdout)  # fd 0 EBADF 走快速失败，不进入 90s 等待
+
+    def test_lock_timeout_is_nonzero_after_probe(self):
+        """探测后锁仍被占用：stderr 为空 → 走原有 90s 有界等待。"""
+        helper = self.lock_source()
+        env = dict(os.environ, FAKE_ROOT=self.root.as_posix())
+        result = subprocess.run(
+                           [BASH, "-c", '. "$1"; flock() { return 1; }; sleep() { :; }; uv_lock',
+                            "test", helper.as_posix()], env=env, capture_output=True,
+                           text=True, encoding="utf-8", timeout=10)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("90s", result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

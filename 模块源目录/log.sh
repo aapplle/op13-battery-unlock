@@ -15,6 +15,14 @@ UV_LOG="$UV_BK/uv2800.log"
 
 # 固定 inode + 继承的文件描述符：进程退出后内核自动释放，不删除锁文件。
 # BusyBox/Toybox 的 flock 不一定支持 -w，统一用 -n 做有界等待。
+#
+# 【fd 0 降级】真机实测（C17/PJZ110）：在 adb `su -c` 上下文里，fd 9 明明已在
+# 当前 shell 打开，flock 子进程却报 Bad file descriptor（toybox/busybox 同样）——
+# 该上下文的子进程不继承 fd>2；而 fd 0（stdin）必然继承。开机（ksud 派生）与
+# 管理器上下文的 fd 模式正常，因此只有 adb 驱动的流程（矩阵、手动 action.sh）
+# 需要降级。flock 锁挂在共享 OFD 上：子进程对 fd 0 加锁、父进程持有同一 OFD，
+# 锁同样持续到脚本退出。本仓库的脚本从不读 stdin，替换 fd 0 无副作用。
+# 探测不能用命令替换包住 flock：必须让 flock 作为当前 shell 的直接子进程运行。
 uv_lock() {
     mkdir -p "$UV_BK" || return 1
     exec 9>"$UV_BK/operation.lock" || return 1
@@ -35,13 +43,29 @@ uv_lock() {
         uv_log "错误：找不到 flock，停止操作（需要 KernelSU BusyBox 或 Toybox flock）"
         return 1
     fi
+    # 有界等待；每次失败后检查 stderr：EBADF 说明当前 fd 在本上下文不被子进程
+    # 继承（实测 C17 adb-su：fd 9 如此，fd 0 正常）—— 第一次发现即换 fd 0 重试，
+    # fd 0 也被拒绝则立即失败，不空转 90s。「锁被占用」的失败 stderr 为空，
+    # 维持原有的跨进程有界等待语义。
     _ul_wait=0
     while [ "$_ul_wait" -lt 90 ]; do
         if [ "$UV_FLOCK" = flock ]; then
-            flock -n 9 2>/dev/null && return 0
+            flock -n ${_ul_fd:-9} 2>"$UV_BK/.lockprobe" && { rm -f "$UV_BK/.lockprobe"; return 0; }
         else
-            "$UV_FLOCK" flock -n 9 2>/dev/null && return 0
+            "$UV_FLOCK" flock -n ${_ul_fd:-9} 2>"$UV_BK/.lockprobe" && { rm -f "$UV_BK/.lockprobe"; return 0; }
         fi
+        if grep -q "Bad file descriptor" "$UV_BK/.lockprobe" 2>/dev/null; then
+            if [ "${_ul_fd:-9}" = 9 ]; then
+                exec 0<"$UV_BK/operation.lock" || return 1
+                exec 9>&-
+                _ul_fd=0
+            else
+                rm -f "$UV_BK/.lockprobe"
+                uv_log "错误：flock 在本上下文不可用（fd 9 与 fd 0 均被拒绝继承），本次未执行"
+                return 1
+            fi
+        fi
+        rm -f "$UV_BK/.lockprobe"
         sleep 1
         _ul_wait=$((_ul_wait+1))
     done
