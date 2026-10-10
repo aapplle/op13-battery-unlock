@@ -1,0 +1,132 @@
+{
+  "model": "PJZ110",
+  "rom": "PJZ110_17.0.0.101(SP02CN01)",
+  "kernel": "6.6.118-android15-8-g9bc34d5b0c79-abogki537459655-4k",
+  "files": [
+    {
+      "file": "uv2800.ko",
+      "source": "/data/adb/modules/uv2800/uv2800.ko",
+      "bytes": 31392,
+      "sha256": "6a8c51cad9ea80621c8be543d7b844dbca37c77a3cbd80c27e08475f26077c98"
+    },
+    {
+      "file": "oplus_chg_v2.ko",
+      "source": "/vendor_dlkm/lib/modules/oplus_chg_v2.ko",
+      "bytes": 11729224,
+      "sha256": "205fb7ebdd5d12438fbd40e7432d12c034929c629a8657ca17f38d50de7c63ce"
+    },
+    {
+      "file": "device_config.gz",
+      "source": "/proc/config.gz",
+      "bytes": 45751,
+      "sha256": "cd038d05716642cc483d5a77d2df9d7f9b84d05749a24675fdf641772e68d3d9"
+    }
+  ],
+  "extracted_on": "2026-10-08",
+  "module_symbol_crc_check": {
+    "_printk": {
+      "expected": "0x92997ed8",
+      "observed": {
+        "uv2800.ko": "0x92997ed8",
+        "oplus_chg_v2.ko": "0x92997ed8"
+      }
+    },
+    "register_kprobe": {
+      "expected": "0x0472cf3b",
+      "observed": {
+        "uv2800.ko": "0x0472cf3b"
+      }
+    },
+    "unregister_kprobe": {
+      "expected": "0xeb78b1ed",
+      "observed": {
+        "uv2800.ko": "0xeb78b1ed"
+      }
+    },
+    "__stack_chk_fail": {
+      "expected": "0xf0fdf6cb",
+      "observed": {
+        "uv2800.ko": "0xf0fdf6cb",
+        "oplus_chg_v2.ko": "0xf0fdf6cb"
+      }
+    },
+    "kstrtoint": {
+      "expected": "0x8c8569cb",
+      "observed": {
+        "uv2800.ko": "0x8c8569cb",
+        "oplus_chg_v2.ko": "0x8c8569cb"
+      }
+    },
+    "memcpy": {
+      "expected": "0x4829a47e",
+      "observed": {
+        "oplus_chg_v2.ko": "0x4829a47e"
+      }
+    },
+    "module_layout": {
+      "expected": "0x4e276f37",
+      "observed": {
+        "uv2800.ko": "0x4e276f37",
+        "oplus_chg_v2.ko": "0x4e276f37"
+      }
+    },
+    "param_ops_int": {
+      "expected": "0xa8d76d3d",
+      "observed": {
+        "uv2800.ko": "0xa8d76d3d",
+        "oplus_chg_v2.ko": "0xa8d76d3d"
+      }
+    },
+    "param_ops_bool": {
+      "expected": "0x327f4ed5",
+      "observed": {
+        "uv2800.ko": "0x327f4ed5",
+        "oplus_chg_v2.ko": "0x327f4ed5"
+      }
+    }
+  },
+  "notes": [
+    "Phone uv2800.ko equals the historical repository prebuilt; it does not contain the pending source fixes.",
+    "Raw device samples remain local; this record publishes hashes and ABI checks only.",
+    "CI uses the pinned source/build config; the running device kernel release differs from the build vermagic."
+  ],
+  "hook_signatures": [
+    {
+      "symbol": "oplus_comm_update_vbat_uv_thr",
+      "offset": "0x2c",
+      "instruction": "0xb9400108",
+      "matches_source": true
+    },
+    {
+      "symbol": "oplus_comm_update_vbat_uv_thr",
+      "offset": "0x30",
+      "instruction": "0xb9000268",
+      "matches_source": true
+    },
+    {
+      "symbol": "vbat_uv_show",
+      "offset": "0x10",
+      "instruction": "0xaa0203e0",
+      "matches_source": true
+    },
+    {
+      "symbol": "vbat_uv_show",
+      "offset": "0x20",
+      "instruction": "0x2a0803e2",
+      "matches_source": true
+    },
+    {
+      "symbol": "oplus_fg_get_deep_term_volt",
+      "offset": "0xe0",
+      "instruction": "0xb9000263",
+      "matches_source": true
+    },
+    {
+      "symbol": "oplus_fg_set_deep_term_volt",
+      "offset": "0x34",
+      "instruction": "0x2a0103f3",
+      "matches_source": true
+    }
+  ],
+  "matched_adsp_profile": "ColorOS 16/17"
+}

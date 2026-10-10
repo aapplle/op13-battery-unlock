@@ -13,6 +13,148 @@
 UV_BK=/data/adb/uv2800_backup
 UV_LOG="$UV_BK/uv2800.log"
 
+# 固定 inode + 继承的文件描述符：进程退出后内核自动释放，不删除锁文件。
+# BusyBox/Toybox 的 flock 不一定支持 -w，统一用 -n 做有界等待。
+#
+# 【fd 0 降级】真机实测（C17/PJZ110）：在 adb `su -c` 上下文里，fd 9 明明已在
+# 当前 shell 打开，flock 子进程却报 Bad file descriptor（toybox/busybox 同样）——
+# 该上下文的子进程不继承 fd>2；而 fd 0（stdin）必然继承。开机（ksud 派生）与
+# 管理器上下文的 fd 模式正常，因此只有 adb 驱动的流程（矩阵、手动 action.sh）
+# 需要降级。flock 锁挂在共享 OFD 上：子进程对 fd 0 加锁、父进程持有同一 OFD，
+# 锁同样持续到脚本退出。本仓库的脚本从不读 stdin，替换 fd 0 无副作用。
+# 探测不能用命令替换包住 flock：必须让 flock 作为当前 shell 的直接子进程运行。
+uv_lock() {
+    mkdir -p "$UV_BK" || return 1
+    exec 9>"$UV_BK/operation.lock" || return 1
+    UV_FLOCK=""
+    if command -v flock >/dev/null 2>&1; then
+        UV_FLOCK=flock
+    else
+        for _ul_bin in /data/adb/ksu/bin/busybox /data/adb/magisk/busybox busybox toybox; do
+            command -v "$_ul_bin" >/dev/null 2>&1 || continue
+            if "$_ul_bin" --list 2>/dev/null | grep -qx flock ||
+               "$_ul_bin" 2>/dev/null | tr ' ,\t' '\n' | grep -qx flock; then
+                UV_FLOCK=$_ul_bin
+                break
+            fi
+        done
+    fi
+    if [ -z "$UV_FLOCK" ]; then
+        uv_log "错误：找不到 flock，停止操作（需要 KernelSU BusyBox 或 Toybox flock）"
+        return 1
+    fi
+    # 有界等待；每次失败后检查 stderr：EBADF 说明当前 fd 在本上下文不被子进程
+    # 继承（实测 C17 adb-su：fd 9 如此，fd 0 正常）—— 第一次发现即换 fd 0 重试，
+    # fd 0 也被拒绝则立即失败，不空转 90s。「锁被占用」的失败 stderr 为空，
+    # 维持原有的跨进程有界等待语义。
+    _ul_wait=0
+    while [ "$_ul_wait" -lt 90 ]; do
+        if [ "$UV_FLOCK" = flock ]; then
+            flock -n ${_ul_fd:-9} 2>"$UV_BK/.lockprobe" && { rm -f "$UV_BK/.lockprobe"; return 0; }
+        else
+            "$UV_FLOCK" flock -n ${_ul_fd:-9} 2>"$UV_BK/.lockprobe" && { rm -f "$UV_BK/.lockprobe"; return 0; }
+        fi
+        if grep -q "Bad file descriptor" "$UV_BK/.lockprobe" 2>/dev/null; then
+            if [ "${_ul_fd:-9}" = 9 ]; then
+                exec 0<"$UV_BK/operation.lock" || return 1
+                exec 9>&-
+                _ul_fd=0
+            else
+                rm -f "$UV_BK/.lockprobe"
+                uv_log "错误：flock 在本上下文不可用（fd 9 与 fd 0 均被拒绝继承），本次未执行"
+                return 1
+            fi
+        fi
+        rm -f "$UV_BK/.lockprobe"
+        sleep 1
+        _ul_wait=$((_ul_wait+1))
+    done
+    uv_log "错误：等待其它模块操作结束超时（90s），本次未执行"
+    return 1
+}
+
+# 成功仅指本次真实读取成功；历史 adsp_state 不是硬件状态的证明。
+uv_read_adsp() {
+    _ur_p=${1:-/sys/module/uv2800/parameters}
+    echo 1 > "$_ur_p/adsp_read" 2>/dev/null || return 1
+    _ur_v=$(cat "$_ur_p/adsp_read" 2>/dev/null) || return 1
+    case "$_ur_v" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$_ur_v" -ge 2000 ] 2>/dev/null && [ "$_ur_v" -le 5000 ] 2>/dev/null || return 1
+    echo "$_ur_v"
+}
+
+uv_set_targets() {
+    _ut_shutdown=$1; _ut_adsp=$2
+    _ut_p=${3:-/sys/module/uv2800/parameters}
+    echo "$_ut_shutdown" > "$_ut_p/uv_target_mv" 2>/dev/null || return 1
+    echo "$_ut_adsp" > "$_ut_p/uv_adsp_mv" 2>/dev/null || return 1
+    echo 1 > "$_ut_p/resume" 2>/dev/null || return 1
+    [ "$(cat "$_ut_p/uv_target_mv" 2>/dev/null)" = "$_ut_shutdown" ] &&
+        [ "$(cat "$_ut_p/uv_adsp_mv" 2>/dev/null)" = "$_ut_adsp" ] &&
+        [ "$(cat "$_ut_p/resume" 2>/dev/null)" = 0 ]
+}
+
+# 管理器卸载只是设置 remove；实际删除阶段不以 uninstall.sh 的退出码为闸门。
+# 因而一键流程必须在任何恢复写入前撤销旧安排，成功验证后才重新安排。
+uv_cancel_remove() {
+    rm -f "$1/remove" /data/adb/modules_update/uv2800/remove || return 1
+    [ ! -e "$1/remove" ] && [ ! -e /data/adb/modules_update/uv2800/remove ]
+}
+
+uv_find_ksud() {
+    for _uk_bin in /data/adb/ksud /data/adb/ksu/bin/ksud; do
+        if [ -x "$_uk_bin" ]; then echo "$_uk_bin"; return 0; fi
+    done
+    command -v ksud 2>/dev/null
+}
+
+uv_schedule_remove() {
+    _us_dir=$1
+    _us_ksud=$(uv_find_ksud) || _us_ksud=""
+    if [ -n "$_us_ksud" ]; then
+        "$_us_ksud" module uninstall uv2800 || return 1
+    else
+        # 本模块没有 initrc；官方 CLI 缺失时，使用公开的 remove 文件协议。
+        touch "$_us_dir/remove" || return 1
+    fi
+    [ -f "$_us_dir/remove" ]
+}
+
+# 单芯 voltage_now 以微伏上报；返回本次确认可恢复的毫伏值。
+uv_restore_voltage() {
+    _uv_v=$(cat /sys/class/power_supply/battery/voltage_now 2>/dev/null) || return 1
+    case "$_uv_v" in ''|*[!0-9]*|??????????*) return 1 ;; esac
+    [ "$_uv_v" -ge 2000000 ] 2>/dev/null && [ "$_uv_v" -le 5000000 ] 2>/dev/null || return 1
+    _uv_v=$((_uv_v / 1000))
+    [ "$_uv_v" -ge 3300 ] && [ "$_uv_v" -gt "$1" ] || return 1
+    echo "$_uv_v"
+}
+
+uv_record_uninstall() {
+    echo "$1" > "$UV_BK/uninstall_verified.tmp" &&
+        mv -f "$UV_BK/uninstall_verified.tmp" "$UV_BK/uninstall_verified"
+}
+
+# 只供卸载时报告“上次验证”的证据，绝不替代在模块仍加载时的实时读取。
+uv_previous_uninstall() {
+    [ -f "$UV_BK/skip" ] && [ ! -e "$UV_BK/restore_pending" ] || return 1
+    _up_v=$(cat "$UV_BK/uninstall_verified" 2>/dev/null) || return 1
+    case "$_up_v" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$_up_v" -ge 2000 ] 2>/dev/null && [ "$_up_v" -le 5000 ] 2>/dev/null || return 1
+    [ "$(cat "$UV_BK/restore_target_mv" 2>/dev/null)" = "$_up_v" ] || return 1
+    echo "$_up_v"
+}
+
+# umount 返回失败既可能是“未挂载”，也可能是权限/命名空间错误；单独只读确认。
+uv_capacity_unbound() {
+    for _um_file in /proc/1/mountinfo /proc/self/mountinfo; do
+        [ -r "$_um_file" ] || return 1
+        _um_info=$(cat "$_um_file" 2>/dev/null) || return 1
+        [ -n "$_um_info" ] || return 1
+        case "$_um_info" in *chip_soc*) return 1 ;; esac
+    done
+}
+
 uv_log() {
     _m="uv2800: $*"
     echo "$_m"
@@ -366,3 +508,9 @@ uv_unbind_capacity() {
     [ "$_un" -gt 0 ] && echo change > "$_CAPUE" 2>/dev/null
     return $_un
 }
+
+# Function libraries only; sourcing does not change device state.
+if [ -n "${MODDIR:-}" ]; then
+    [ -f "$MODDIR/policy.sh" ] && . "$MODDIR/policy.sh"
+    [ -f "$MODDIR/restore.sh" ] && . "$MODDIR/restore.sh"
+fi

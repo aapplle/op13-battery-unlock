@@ -19,7 +19,7 @@
 | 用途 | 仓库 | 分支 | 固定 commit |
 |---|---|---|---|
 | **编译模块（必需）** | [OnePlusOSS/android_kernel_oneplus_sm8750](https://github.com/OnePlusOSS/android_kernel_oneplus_sm8750) | `oneplus/sm8750_b_16.0.0_oneplus_13` | `6028f47faddaa27700f8dd3a1d83906ea8f27170` |
-| 厂商驱动 + 设备树（阅读/对照用，**非编译必需**） | [OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8750](https://github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8750) | `oneplus/sm8750_b_16.0.0_oneplus_13` | `d50b305f7da9e14715a25120a4ac7b1a4b8b97c3` |
+| **OEM Kconfig/头文件依赖（编译必需，稀疏检出）**，其余厂商驱动与设备树供对照 | [OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8750](https://github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8750) | `oneplus/sm8750_b_16.0.0_oneplus_13` | `d50b305f7da9e14715a25120a4ac7b1a4b8b97c3` |
 
 - **内核版本**：Linux 6.6.118
 - **许可证**：GPL-2.0（树内 `COPYING`：`SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note`）
@@ -38,6 +38,8 @@
 # 默认落到 ./编译用内核树/android_kernel_oneplus_sm8750
 ```
 
+固定内核自带指向 OEM 树的相对符号链接，包括 `kernel/oplus_cpu`、`drivers/soc/oplus/dfr`、传感器、显示 trackpoint 及公开头文件；只拉内核会让 Kconfig 的 `source` 入口断开。`fetch-kernel.sh` 也会按固定提交稀疏检出这些链接实际引用的 OEM 子树，并建立 `编译用内核树/../vendor` 链接恢复上游布局。内核中的原始链接保持不变；不会生成空 Kconfig 或移除 ABI 配置。下载后递归检查 Kconfig 入口，构建清单记录 OEM commit 和链接映射摘要。
+
 ## 1.4 编译
 
 ```sh
@@ -53,15 +55,12 @@ make ARCH=arm64 LLVM=1 olddefconfig
 make ARCH=arm64 LLVM=1 modules_prepare
 cp "$KB/Module.symvers" "$KT/Module.symvers"
 
-# 2) 编译模块（源码在 内核源码/）
-make ARCH=arm64 LLVM=1 M="$ROOT/内核源码" modules
-llvm-strip --strip-debug "$ROOT/内核源码/uv2800.ko"
-
-# 3) 打包发布 zip（从 模块源目录/ 构建）
-cd "$ROOT/模块源目录" && zip -q -r "$ROOT/一加13解容-v$(grep '^version=' module.prop | cut -d= -f2).zip" .
+# 2) 在隔离目录编译、校验 ABI、同步 .ko/构建清单，再打包
+cd "$ROOT"
+bash 自动化测试矩阵/build.sh
 ```
 
-> 也可以直接用 `自动化测试矩阵/build.sh`（它封装了 2)+3) 两步）。
+> 构建脚本生成 `模块源目录/uv2800.build.json`，记录实际源码、配置、符号表、工具链与二进制摘要。发布工作流要求清单匹配当前源码，禁止把旧 `.ko` 当作新源码制品直接打包。
 
 **产物核验基线**：`.gnu.linkonce.this_module` 节区大小应严格为 `0x600`（1536 字节）。
 

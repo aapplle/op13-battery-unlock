@@ -50,7 +50,9 @@
 //  宁可模块不加载，也不在未知内核上乱改寄存器；profile 未匹配时只注册
 //  ①② 显示 hook，不动 ③④。
 //  口径：C15/16/17 三驱动静态核对通过 + ColorOS 16 / 内核 6.6.118 真机验证；
-//  C15/C17 无真机数据。
+//  C17（PJZ110 17.0.0.101 / 内核 6.6.118）已用 v10.8 包真机验证加载
+//  （insmod 成功，指令字与本模块 profile 一致，见 DEVICE-VALIDATION 文档）；
+//  C15 无真机数据。
 //
 // ★ kCFI 注意事项（崩溃教训）
 //   在 CONFIG_CFI_CLANG=y 且未开 CFI_PERMISSIVE 的内核上，
@@ -62,6 +64,8 @@
 #include <linux/kprobes.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
+#include <linux/sched.h>
+#include <linux/smp.h>
 
 #define UV_TARGET_MV 2800
 
@@ -84,32 +88,32 @@ static int uv_target_mv = UV_TARGET_MV;
 /* uv_target_mv 范围钳制
  * 任意整数都会直接成为 vbat_uv，必须限制在合理范围内
  * （与 adsp_write 的 2000~5000 钳制一致）。*/
-static int uv_target_mv_set(const char *val, const struct kernel_param *kp)
+static int uv_voltage_set(const char *val, const struct kernel_param *kp)
 {
 	int v;
 
 	if (kstrtoint(val, 10, &v))
 		return -EINVAL;
 	if (v < 2000 || v > 5000) {
-		pr_warn("uv2800: uv_target_mv %d mV 超出范围 2000~5000，拒绝\n", v);
+		pr_warn("uv2800: 电压目标 %d mV 超出范围 2000~5000\n", v);
 		return -EINVAL;
 	}
-	uv_target_mv = v;
+	WRITE_ONCE(*(int *)kp->arg, v);
 	return 0;
 }
 
 static int uv_itoa(char *buf, int v);
 
-static int uv_target_mv_get(char *buf, const struct kernel_param *kp)
+static int uv_voltage_get(char *buf, const struct kernel_param *kp)
 {
-	return uv_itoa(buf, uv_target_mv);
+	return uv_itoa(buf, READ_ONCE(*(int *)kp->arg));
 }
 
-static const struct kernel_param_ops uv_target_mv_ops = {
-	.set = uv_target_mv_set,
-	.get = uv_target_mv_get,
+static const struct kernel_param_ops uv_voltage_ops = {
+	.set = uv_voltage_set,
+	.get = uv_voltage_get,
 };
-module_param_cb(uv_target_mv, &uv_target_mv_ops, &uv_target_mv, 0644);
+module_param_cb(uv_target_mv, &uv_voltage_ops, &uv_target_mv, 0644);
 MODULE_PARM_DESC(uv_target_mv, "forced vbat_uv value in mV (default 2800, range 2000~5000)");
 
 /* ------------------------------------------------------------------
@@ -128,7 +132,7 @@ MODULE_PARM_DESC(uv_target_mv, "forced vbat_uv value in mV (default 2800, range 
  *   echo 2540 > /sys/module/uv2800/parameters/adsp_write
  * ------------------------------------------------------------------ */
 static int uv_adsp_mv = 2540;	/* 默认：V_s=2800, FLOOR=3060 -> 2800-(3060-2800)=2540 */
-module_param(uv_adsp_mv, int, 0644);
+module_param_cb(uv_adsp_mv, &uv_voltage_ops, &uv_adsp_mv, 0644);
 MODULE_PARM_DESC(uv_adsp_mv, "ADSP deep_term_volt target in mV (default 2540)");
 
 /* ================= profile（跨版本） ================= */
@@ -183,10 +187,14 @@ static void *uv_dev;          /* 从 getter 入口 x0（或 deep_dischg 入口�
 static void *uv_set_addr;     /* oplus_fg_set_deep_term_volt 地址 */
 static int   uv_bypass;       /* 1 = 放行所有 hook（回写后进入恢复模式）*/
 static int   uv_last_volt;    /* 最近一次回写的电压（只用于 get 显示）*/
-static int   uv_self_write;   /* 1 = 本次 setter 调用来自模块自己，hook 放行 */
-static int   uv_self_read;    /* 1 = 本次 getter 调用来自模块自己，hook 放行 */
+/* sysfs 参数回调由模块参数锁串行执行；只旁路当前调用任务，其他任务照常强制。
+ * 厂商函数可以睡眠/迁移 CPU，故这里使用 task 身份而非 CPU 标志。 */
+static struct task_struct *uv_write_task;
+static struct task_struct *uv_read_task;
 static void *uv_get_addr;     /* oplus_fg_get_deep_term_volt 地址 */
 static int   uv_adsp_raw;     /* 直读到的 ADSP 原值 */
+static bool uv_hooks_ready;   /* 全部必要探针注册成功后才允许修改寄存器 */
+static bool uv_adsp_ready;    /* profile 和 ADSP 必要探针均已验证 */
 
 static int uv_read_word(const char *sym, unsigned int off, u32 *out)
 {
@@ -329,7 +337,7 @@ static int uv_resume_set(const char *val, const struct kernel_param *kp)
 	}
 
 	uv_resume_val = v;
-	uv_bypass = v ? 0 : 1;
+	WRITE_ONCE(uv_bypass, v ? 0 : 1);
 
 	if (v)
 		pr_info("uv2800: resume=1，已退出恢复模式，所有 hook 重新生效\n");
@@ -341,7 +349,7 @@ static int uv_resume_set(const char *val, const struct kernel_param *kp)
 /* 读：直接反映 uv_bypass，避免与 uv_resume_val 不一致 */
 static int uv_resume_get(char *buf, const struct kernel_param *kp)
 {
-	buf[0] = uv_bypass ? '1' : '0';
+	buf[0] = READ_ONCE(uv_bypass) ? '1' : '0';
 	return 1;
 }
 
@@ -376,33 +384,36 @@ static int uv_adsp_write_val;
 
 static int uv_adsp_write_set(const char *val, const struct kernel_param *kp)
 {
-	int v, rc = 0;
+	void *dev, *fn;
+	int v, rc;
 
 	if (kstrtoint(val, 10, &v)) {
 		pr_warn("uv2800: adsp_write 无法解析 '%s'（应写 2000~5000）\n", val);
 		return -EINVAL;
 	}
 
+	if (v < 2000 || v > 5000)
+		return -EINVAL;
+	if (!smp_load_acquire(&uv_adsp_ready))
+		return -EOPNOTSUPP;
+	dev = READ_ONCE(uv_dev);
+	fn = uv_set_addr;
+	if (!dev || !fn)
+		return -EAGAIN;
+
+	WRITE_ONCE(uv_write_task, current);
+	if (cur_set_ptr)
+		rc = uv_call_setter_ptr(dev, &v, fn);
+	else
+		rc = uv_call_setter_val(dev, v, fn);
+	WRITE_ONCE(uv_write_task, NULL);
+	pr_info("uv2800: [adsp_write] 写 %d mV，返回 %d\n", v, rc);
+	/* setter 成功返回 0（真机实测），失败是负 errno；正返回值无证据支持，
+	 * 但按内核约定不应视为成功 —— 保持与 errno 语义一致的判定。*/
+	if (rc)
+		return rc < 0 ? rc : -EIO;
 	uv_adsp_write_val = v;
-
-	if (v >= 2000 && v <= 5000) {
-		if (!uv_dev || !uv_set_addr) {
-			pr_warn("uv2800: 信息不全 (dev=%px set=%px)\n", uv_dev, uv_set_addr);
-			return -EAGAIN;
-		}
-		/* 关键：告诉 setter hook「这次是模块自己发的」，否则会被强制成 2800 */
-		uv_self_write = 1;
-		if (cur_set_ptr)
-			rc = uv_call_setter_ptr(uv_dev, &v, uv_set_addr);
-		else
-			rc = uv_call_setter_val(uv_dev, v, uv_set_addr);
-		uv_self_write = 0;
-		uv_last_volt = v;
-		pr_info("uv2800: [adsp_write] 写 %d mV，返回 %d（强制仍生效）\n", v, rc);
-	} else if (v != 0) {
-		pr_warn("uv2800: adsp_write 写入 %d 不是有效电压（应写 2000~5000）\n", v);
-	}
-
+	uv_last_volt = v;
 	return 0;
 }
 
@@ -441,21 +452,34 @@ int uv_call_getter(void *dev, int *out, void *fn)
 
 static int uv_adsp_read_set(const char *val, const struct kernel_param *kp)
 {
+	void *dev, *fn;
 	int out = 0, rc;
 
-	if (uv_get_addr && uv_dev) {
-		uv_self_read = 1;
-		rc = uv_call_getter(uv_dev, &out, uv_get_addr);
-		uv_self_read = 0;
-		uv_adsp_raw = out;
-		if (uv_adsp_debug)
-			pr_info("uv2800: 直读 ADSP deep_term_volt = %d mV (rc=%d)\n", out, rc);
-	} else {
-		/* 默认静默：轮询期间这里最多被调用 10 次（service.sh 探测循环）。
-		 * 不打印内核地址（uv_dev / uv_get_addr），避免无意义信息泄漏。 */
-		if (uv_adsp_debug)
-			pr_warn("uv2800: 直读失败（uv_dev 未捕获 / get 地址未解析）\n");
-	}
+	/* 失败时清除上次读数，兼容仍采用“写触发 + cat”协议的用户态。 */
+	uv_adsp_raw = 0;
+	if (!smp_load_acquire(&uv_adsp_ready))
+		return -EOPNOTSUPP;
+	dev = READ_ONCE(uv_dev);
+	fn = uv_get_addr;
+	if (!fn || !dev)
+		return -EAGAIN;
+	WRITE_ONCE(uv_read_task, current);
+	rc = uv_call_getter(dev, &out, fn);
+	WRITE_ONCE(uv_read_task, NULL);
+	if (uv_adsp_debug)
+		pr_info("uv2800: 直读 ADSP deep_term_volt = %d mV (rc=%d)\n", out, rc);
+	/* 【返回值语义】真机（C17/PJZ110 实测）getter 成功时返回的是电压本身
+	 * （正值，rc == out == 3060/2540），失败才是负 errno —— 内核约定里正返回
+	 * 值从来不是错误码。setter 则相反，成功返回 0（实测「写 3060 mV，返回 0」），
+	 * 两者判定不能共用一套。这里只把负值当失败，并用 out 的物理区间兜底
+	 * （getter 失败时常不写 out → 保持 0），与 log.sh uv_read_adsp 的
+	 * 2000~5000 校验口径一致。曾按 errno 语义判 rc>0 为失败，导致真机
+	 * adsp_read 永远 -EIO、恢复事务整体不可用（矩阵 15 连败的根因）。*/
+	if (rc < 0)
+		return rc;
+	if (out < 2000 || out > 5000)
+		return -EIO;
+	uv_adsp_raw = out;
 	return 0;
 }
 
@@ -480,8 +504,8 @@ static struct kprobe kp_get = {
 };
 static int uv_get(struct kprobe *p, struct pt_regs *regs)
 {
-	if (!uv_bypass)
-		regs->regs[8] = uv_target_mv;
+	if (smp_load_acquire(&uv_hooks_ready) && !READ_ONCE(uv_bypass))
+		regs->regs[8] = READ_ONCE(uv_target_mv);
 	return 0;
 }
 
@@ -493,8 +517,8 @@ static struct kprobe kp_show = {
 };
 static int uv_show(struct kprobe *p, struct pt_regs *regs)
 {
-	if (!uv_bypass)
-		regs->regs[8] = uv_target_mv;
+	if (smp_load_acquire(&uv_hooks_ready) && !READ_ONCE(uv_bypass))
+		regs->regs[8] = READ_ONCE(uv_target_mv);
 	return 0;
 }
 
@@ -511,8 +535,9 @@ static struct kprobe kp_term_get = {
 };
 static int uv_term_get(struct kprobe *p, struct pt_regs *regs)
 {
-	if (!uv_bypass && !uv_self_read)
-		regs->regs[cur_get_reg] = uv_adsp_mv;	/* 用独立 ADSP 目标 */
+	if (smp_load_acquire(&uv_hooks_ready) && !READ_ONCE(uv_bypass) &&
+	    READ_ONCE(uv_read_task) != current)
+		regs->regs[cur_get_reg] = READ_ONCE(uv_adsp_mv);
 	return 0;
 }
 
@@ -526,7 +551,7 @@ static struct kprobe kp_term_entry = {
 };
 static int uv_term_entry(struct kprobe *p, struct pt_regs *regs)
 {
-	uv_dev = (void *)regs->regs[0];
+	WRITE_ONCE(uv_dev, (void *)regs->regs[0]);
 	return 0;
 }
 
@@ -549,9 +574,9 @@ static struct kprobe kp_ddrc = {
 };
 static int uv_ddrc_entry(struct kprobe *p, struct pt_regs *regs)
 {
-	if (!uv_dev) {
-		uv_dev = (void *)regs->regs[0];
-		pr_info("uv2800: 从 deep_dischg 入口捕获 device=%px\n", uv_dev);
+	if (!READ_ONCE(uv_dev)) {
+		WRITE_ONCE(uv_dev, (void *)regs->regs[0]);
+		pr_info("uv2800: 从 deep_dischg 入口捕获 device\n");
 	}
 	return 0;
 }
@@ -567,15 +592,56 @@ static struct kprobe kp_term_set = {
 };
 static int uv_term_set(struct kprobe *p, struct pt_regs *regs)
 {
-	if (!uv_bypass && !uv_self_write)
-		regs->regs[cur_set_reg] = uv_adsp_mv;	/* 用独立 ADSP 目标 */
+	if (smp_load_acquire(&uv_hooks_ready) && !READ_ONCE(uv_bypass) &&
+	    READ_ONCE(uv_write_task) != current)
+		regs->regs[cur_set_reg] = READ_ONCE(uv_adsp_mv);
+	return 0;
+}
+
+/* 只记录成功注册的探针；失败的 register_kprobe 也可能填写 addr，
+ * 因此不能把 addr 非空当作已注册。失败回滚和卸载共用逆序清理。 */
+static struct kprobe *uv_registered[6];
+static unsigned int uv_registered_count;
+
+static int uv_register_probe(struct kprobe *probe)
+{
+	int ret = register_kprobe(probe);
+
+	if (ret) {
+		pr_err("uv2800: 注册 %s+%#x 失败 (%d)\n",
+		       probe->symbol_name, probe->offset, ret);
+		return ret;
+	}
+	uv_registered[uv_registered_count++] = probe;
+	return 0;
+}
+
+static void uv_unregister_all(void)
+{
+	WRITE_ONCE(uv_hooks_ready, false);
+	WRITE_ONCE(uv_adsp_ready, false);
+	while (uv_registered_count)
+		unregister_kprobe(uv_registered[--uv_registered_count]);
+	/* exit 先于参数 sysfs 删除：保留初始化后只读的调用地址，使已经
+	 * 通过 ready 检查的回调可完成。后续 sysfs teardown 排空回调后才
+	 * 释放模块内存；exit 本身不等待 ADSP I/O。 */
+}
+
+static int uv_resolve_addr(const char *sym, void **addr)
+{
+	struct kprobe probe = { .symbol_name = sym };
+	int ret = register_kprobe(&probe);
+
+	if (ret)
+		return ret;
+	*addr = (void *)probe.addr;
+	unregister_kprobe(&probe);
 	return 0;
 }
 
 static int __init uv2800_init(void)
 {
-	int ret, n = 0;
-	u32 tmp;
+	int ret;
 
 	pr_info("uv2800: v11.0 init (vbat_uv=%d mV, adsp=%d mV)\n",
 		uv_target_mv, uv_adsp_mv);
@@ -584,65 +650,62 @@ static int __init uv2800_init(void)
 	if (ret)
 		return ret;
 
-	/* 取 getter 地址（直读用）*/
-	if (!uv_read_word("oplus_fg_get_deep_term_volt", 0, &tmp)) {
-		kp_verify.symbol_name = "oplus_fg_get_deep_term_volt";
-		kp_verify.addr = NULL;
-		if (!register_kprobe(&kp_verify)) {
-			uv_get_addr = (void *)kp_verify.addr;
-			unregister_kprobe(&kp_verify);
-			kp_verify.addr = NULL;
-			kp_verify.symbol_name = NULL;
-		}
-	}
-
-	/* 取 setter 地址（回写用）*/
-	if (!uv_read_word("oplus_fg_set_deep_term_volt", 0, &tmp)) {
-		kp_verify.symbol_name = "oplus_fg_set_deep_term_volt";
-		kp_verify.addr = NULL;
-		if (!register_kprobe(&kp_verify)) {
-			uv_set_addr = (void *)kp_verify.addr;
-			unregister_kprobe(&kp_verify);
-			kp_verify.addr = NULL;
-			kp_verify.symbol_name = NULL;
-		}
-	}
-
 	ret = uv_detect_profile();
 	if (ret) {
-		pr_err("uv2800: 未匹配到 profile -- 只注册显示 hook\n");
+		pr_warn("uv2800: 未匹配到 profile -- 只注册显示 hook，ADSP 接口关闭\n");
 	} else {
+		/* 只有 ABI 验证通过才解析可调用地址和捕获 dev。 */
+		ret = uv_resolve_addr("oplus_fg_get_deep_term_volt", &uv_get_addr);
+		if (ret)
+			goto fail;
+		ret = uv_resolve_addr("oplus_fg_set_deep_term_volt", &uv_set_addr);
+		if (ret)
+			goto fail;
 		kp_term_get.offset = uv_profiles[cur_profile_idx].get_off;
 		kp_term_set.offset = uv_profiles[cur_profile_idx].set_off;
 
-		if (!register_kprobe(&kp_term_get)) n++;
-		if (!register_kprobe(&kp_term_set)) n++;
-		if (!register_kprobe(&kp_term_entry)) n++;
+		ret = uv_register_probe(&kp_term_get);
+		if (ret)
+			goto fail;
+		ret = uv_register_probe(&kp_term_set);
+		if (ret)
+			goto fail;
+		ret = uv_register_probe(&kp_term_entry);
+		if (ret)
+			goto fail;
 	}
 
-	if (!register_kprobe(&kp_get)) n++;
-	else { pr_err("uv2800: kp_get 失败\n"); return -EIO; }
-	if (!register_kprobe(&kp_show)) n++;
-	else { pr_err("uv2800: kp_show 失败\n"); return -EIO; }
+	ret = uv_register_probe(&kp_get);
+	if (ret)
+		goto fail;
+	ret = uv_register_probe(&kp_show);
+	if (ret)
+		goto fail;
 
-	/* 无需 vote 的 uv_dev 捕获（best-effort，失败不影响主体功能）*/
-	if (!register_kprobe(&kp_ddrc)) n++;
-	else pr_warn("uv2800: kp_ddrc 注册失败（deep_dischg 入口），回退到插拔捕获\n");
+	/* 无需 vote 的捕获为可选能力；未知 profile 不注册任何 ADSP 探针。 */
+	if (cur_profile_idx >= 0) {
+		if (uv_register_probe(&kp_ddrc))
+			pr_warn("uv2800: deep_dischg 捕获不可用，回退到插拔捕获\n");
+		smp_store_release(&uv_adsp_ready, true);
+	}
+	smp_store_release(&uv_hooks_ready, true);
 
-	pr_info("uv2800: v11 ready, %d 个 hook, profile=[%s], vbat_uv=%d adsp=%d\n",
-		n, cur_profile, uv_target_mv, uv_adsp_mv);
-	pr_info("uv2800: 回写入口 /sys/module/uv2800/parameters/adsp_write（写电压值，如 3250）\n");
+	pr_info("uv2800: v11 ready, %u 个 hook, profile=[%s], vbat_uv=%d adsp=%d\n",
+		uv_registered_count, cur_profile, uv_target_mv, uv_adsp_mv);
 	return 0;
+
+fail:
+	uv_unregister_all();
+	/* 失败路径从未发布 ADSP ready，没有已进入的自身 I/O。 */
+	WRITE_ONCE(uv_dev, NULL);
+	uv_get_addr = NULL;
+	uv_set_addr = NULL;
+	return ret;
 }
 
 static void __exit uv2800_exit(void)
 {
-	if (kp_ddrc.addr)        unregister_kprobe(&kp_ddrc);
-	if (kp_term_entry.addr)  unregister_kprobe(&kp_term_entry);
-	if (kp_term_set.addr)    unregister_kprobe(&kp_term_set);
-	if (kp_term_get.addr)    unregister_kprobe(&kp_term_get);
-	if (kp_get.addr)         unregister_kprobe(&kp_get);
-	if (kp_show.addr)        unregister_kprobe(&kp_show);
+	uv_unregister_all();
 	pr_info("uv2800: unloaded\n");
 }
 

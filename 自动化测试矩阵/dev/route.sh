@@ -94,7 +94,9 @@ else bind_mode=current; fi
 if [ "$n_pfd" -gt 0 ]; then
     pseg=$(tail -n +"$n_pfd" "$L" 2>/dev/null)
     case "$pseg" in
-        *'post-fs-data insmod rc=0'*)     pfd_insmod=ok ;;
+        # v10 记 "insmod rc=0"；v11 起记 "insmod 成功"（06ad948 改的文案，
+        # route.sh 未跟着改 → ok 分支自 v11 起不可达，T10.2 必失败）。
+        *'post-fs-data insmod rc=0'*|*'post-fs-data insmod 成功'*)     pfd_insmod=ok ;;
         *'模块已在内存，跳过 insmod'*)     pfd_insmod=skip ;;
         *)                                pfd_insmod=? ;;
     esac

@@ -1,0 +1,18 @@
+# Device scripts and build inputs must have the same bytes on Windows and Linux.
+.gitattributes text eol=lf
+.gitignore text eol=lf
+*.sh text eol=lf
+*.py text eol=lf
+*.c text eol=lf
+*.h text eol=lf
+Makefile text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.prop text eol=lf
+device_config text eol=lf
+Module.symvers text eol=lf
+**/META-INF/** text eol=lf
+*.ko -text
+*.bin -text

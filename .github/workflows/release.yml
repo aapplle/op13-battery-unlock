@@ -1,67 +1,142 @@
-name: Release
-
-# 发布流程：从 `模块源目录/` 打包出可刷入的 zip，并作为 Release 资产发布。
-#
-#   · push tag（v*）  → 打包 + 建 Release
-#   · 手动触发        → 只打包，产物在 Actions 的 Artifacts 里
-#
-# 说明：
-#  1) 本工作流【不重新编译】—— `模块源目录/uv2800.ko` 随仓库提交，且自 v11 起逐字节未变。
-#     若改动了 `内核源码/uv2800.c`，请先在本地运行 `自动化测试矩阵/build.sh`
-#     （它会拉内核树、编译、同步 .ko 进 `模块源目录/`）并提交新的 .ko，再打 tag。
-#     编译步骤见 THIRD-PARTY-NOTICES.md §1.4。
-#  2) 资产名**必须用 ASCII**：softprops/action-gh-release 会把非 ASCII 文件名截坏
-#     （实测 `一加13解容-v11.zip` → `13.-v11.zip`）。zip 内容不受影响，刷入时文件名无所谓。
+name: Build and test
 
 on:
   push:
+    branches: [main]
     tags: ['v*']
+  pull_request:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
     env:
       LANG: C.UTF-8
       LC_ALL: C.UTF-8
+      PYTHONUTF8: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      version: ${{ steps.artifacts.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: 从 模块源目录/ 构建 zip
-        id: build
+      - name: 安装 Linux / LLVM 18 构建依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang-18 llvm-18 lld-18 bc bison flex \
+            libssl-dev libelf-dev libzstd-dev zlib1g-dev dwarves pkg-config \
+            python3 git zip unzip rsync cpio file xz-utils zstd
+          mkdir -p ci-logs
+
+      - name: 宿主回归（无需手机）
+        run: python3 -m unittest discover -s 自动化测试矩阵/host -p 'test_*.py' -v 2>&1 | tee ci-logs/host-tests.log
+
+      # 缓存固定提交的内核树 + modules_prepare 产物。
+      # 命中时跳过 GB 级 fetch 和数分钟的 modules_prepare；未命中走原全量路径。
+      # prepare-kernel.sh 对已就绪的树幂等：modules_prepare 重跑几乎零成本。
+      - name: 恢复内核树缓存（固定提交）
+        uses: actions/cache/restore@v4
+        with:
+          path: 编译用内核树
+          key: kernel-6028f47faddaa27700f8dd3a1d83906ea8f27170-v2
+          restore-keys: |
+            kernel-6028f47faddaa27700f8dd3a1d83906ea8f27170-
+
+      - name: 拉取固定提交的内核和必要 OEM 子树
+        run: bash fetch-kernel.sh 2>&1 | tee ci-logs/fetch-kernel.log
+
+      - name: 配置内核并准备外部模块构建
+        run: bash 自动化测试矩阵/prepare-kernel.sh 2>&1 | tee ci-logs/prepare-kernel.log
+
+      - name: 保存内核树缓存（仅主分支/tag）
+        if: github.event_name == 'push'
+        uses: actions/cache/save@v4
+        with:
+          path: 编译用内核树
+          key: kernel-6028f47faddaa27700f8dd3a1d83906ea8f27170-v2-${{ github.run_id }}
+
+      - name: 从当前源码编译、验证并打包
+        run: |
+          bash 自动化测试矩阵/build.sh 2>&1 | tee ci-logs/build.log
+          python3 自动化测试矩阵/host/build_metadata.py verify
+
+      - name: 整理构建产物及摘要
+        id: artifacts
         run: |
           set -euo pipefail
-          VER="$(grep '^version=' 模块源目录/module.prop | cut -d= -f2)"
-          VCODE="$(grep '^versionCode=' 模块源目录/module.prop | cut -d= -f2)"
-          # 资产名固定为 ASCII：action-gh-release 会把非 ASCII 文件名截坏
-          NAME="op13-battery-unlock.zip"
-          rm -f "$NAME"
-          ( cd 模块源目录 && zip -q -r "$GITHUB_WORKSPACE/$NAME" . -x '*.prev' )
-          MD5="$(md5sum "$NAME" | cut -d' ' -f1)"
-          echo "name=$NAME"     >> "$GITHUB_OUTPUT"
-          echo "ver=$VER"       >> "$GITHUB_OUTPUT"
-          echo "vcode=$VCODE"   >> "$GITHUB_OUTPUT"
-          echo "md5=$MD5"       >> "$GITHUB_OUTPUT"
-          echo "=== 产物 ==="
-          ls -la "$NAME"
-          echo "$MD5  $NAME"
+          VERSION="$(sed -n 's/^version=//p' 模块源目录/module.prop)"
+          mkdir -p dist
+          # Release 资产使用 ASCII 名；模块包内容仍由 build.sh 唯一生成。
+          cp "一加13解容-v${VERSION}.zip" dist/op13-battery-unlock.zip
+          cp 模块源目录/uv2800.ko 模块源目录/uv2800.build.json dist/
+          cp 编译用内核树/android_kernel_oneplus_sm8750/.config dist/kernel.config
+          git rev-parse HEAD > dist/source-commit.txt
+          (cd dist && sha256sum op13-battery-unlock.zip uv2800.ko uv2800.build.json kernel.config source-commit.txt > SHA256SUMS)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          cat dist/SHA256SUMS
 
-      - name: 上传构建产物
+      - name: 上传模块和构建清单
         uses: actions/upload-artifact@v4
         with:
-          name: module-zip
-          path: ${{ steps.build.outputs.name }}
+          name: module-build
+          path: dist/
           if-no-files-found: error
 
-      - name: 发布 Release（仅 tag 触发）
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: 保留配置差异和诊断日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-diagnostics
+          path: |
+            ci-logs/
+            编译用内核树/android_kernel_oneplus_sm8750/.config
+            编译用内核树/android_kernel_oneplus_sm8750/config.diff
+            编译用内核树/android_kernel_oneplus_sm8750/vendor-dependencies.json
+          include-hidden-files: true
+          if-no-files-found: ignore
+
+  release:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout release notes
+        uses: actions/checkout@v4
+
+      - name: 下载本次源码构建的产物
+        uses: actions/download-artifact@v4
+        with:
+          name: module-build
+          path: dist
+
+      - name: 核对下载产物
+        run: cd dist && sha256sum -c SHA256SUMS
+
+      - name: 发布 Release（仅 v* tag push）
         uses: softprops/action-gh-release@v2
         with:
-          name: 一加13解容 uv2800 v${{ steps.build.outputs.ver }}
-          files: ${{ steps.build.outputs.name }}
+          name: 一加13解容 uv2800 v${{ needs.build.outputs.version }}
+          files: |
+            dist/op13-battery-unlock.zip
+            dist/uv2800.ko
+            dist/uv2800.build.json
+            dist/kernel.config
+            dist/source-commit.txt
+            dist/SHA256SUMS
           body_path: RELEASE-NOTES.md
           generate_release_notes: true
