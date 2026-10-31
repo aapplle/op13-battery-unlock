@@ -11,7 +11,7 @@
 #   2) 软重启后管理器可能重跑 `ksud late-load` -> 本脚本会被重复执行
 #      所以「已加载则跳过」，避免重复 insmod 破坏已有状态（uv_dev 等）
 #
-#    回写电量计必须读实时 DT 算原值，唯一入口是 action.sh（操作按钮）
+#    回写电量计必须读实时 DT 算原值，入口是 WebUI「恢复原厂」或终端 restore.sh
 #    或手动 echo <mV> > /sys/module/uv2800/parameters/adsp_write
 #    （写之前请确认 uv_dev 已捕获）。
 #
