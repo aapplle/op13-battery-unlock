@@ -621,8 +621,43 @@ cmd_set_policy() {
     printf 'DETAIL=rc:%s\n' "$_uvsp_rc"
 }
 
+# ---------- 后台操作（避免 ksu.exec 同步桥阻塞 WebView 主线程） ----------
+# JS 调 run-bg 只启动子进程并立即返回；随后用 op-result 轮询结果。
+cmd_run_bg() {
+    if [ "$#" -lt 1 ]; then
+        printf 'RESULT=fail\nCODE=usage\nDETAIL=run-bg_missing\n'
+        return 2
+    fi
+    _uvbg_out="$BK/.webui_op.out"
+    _uvbg_rc="$BK/.webui_op.rc"
+    rm -f "$_uvbg_out" "$_uvbg_rc"
+    # 双 fork + setsid + 关闭继承 fd：让真正的命令脱离当前 shell/会话。
+    # 只重定向还不够——子 shell 继承的 fd 会让 ksu.exec 同步桥等到命令结束。
+    ( ( exec setsid sh -c 'o=$1; r=$2; shift 2; sh "$0" "$@" >"$o" 2>&1; echo $? >"$r"' \
+        "$MODDIR/webui.sh" "$_uvbg_out" "$_uvbg_rc" "$@" ) \
+        </dev/null >/dev/null 2>&1 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&- & ) &
+    printf 'RESULT=ok\nCODE=started\n'
+}
+
+cmd_op_result() {
+    if [ -f "$BK/.webui_op.rc" ]; then
+        cat "$BK/.webui_op.out" 2>/dev/null
+        printf 'RC=%s\n' "$(cat "$BK/.webui_op.rc" 2>/dev/null)"
+        rm -f "$BK/.webui_op.out" "$BK/.webui_op.rc"
+    else
+        printf 'RESULT=busy\nCODE=running\n'
+    fi
+}
+
 # ---------- 入口 ----------
 case "${1:-}" in
+    run-bg)
+        shift
+        cmd_run_bg "$@"
+        ;;
+    op-result)
+        cmd_op_result
+        ;;
     status)
         cmd_status
         ;;
