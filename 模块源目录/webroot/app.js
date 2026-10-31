@@ -309,7 +309,8 @@
     var connected = state.connected;
     var busy = state.busy;
     var dec = state.mode === "decoupled";
-    var canApply = connected && !busy && dec;
+    var factory = state.mode === "factory";
+    var canApply = connected && !busy && (dec || factory);
     var canRestore = connected && !busy && (dec || state.mode === "disabled");
     var canReal = connected && !busy && dec &&
       !(state.status && state.status.NO_ADSP_WRITE === "yes");
@@ -326,7 +327,7 @@
     var sw = $("realSocSwitch");
     if (sw) sw.disabled = !canReal;
     var ss = $("superSaverSwitch");
-    if (ss) ss.disabled = true;
+    if (ss) ss.disabled = !connected || busy || !dec;
     var refresh = $("refreshBtn");
     if (refresh) refresh.disabled = !connected || busy;
     var refresh2 = $("refreshBtn2");
@@ -391,7 +392,7 @@
     var dec = state.mode === "decoupled";
     var factory = state.mode === "factory";
 
-    setText("voltageValue", dec ? String(state.vs) : "—");
+    setText("voltageValue", (dec || factory) ? String(state.vs) : "—");
     setText("derivedAdsp", dec ? String(derived(state.vs)) : "—");
     setText("derivedUnit", dec ? "mV" : "");
 
@@ -417,12 +418,12 @@
 
     var btn = $("applyBtn");
     if (btn) {
-      btn.textContent = factory ? "重新启用（Phase 2）" : "应用并重跑 service.sh";
+      btn.textContent = factory ? "重新启用并应用" : "应用并重跑 service.sh";
     }
 
     var hint = $("voltageHint");
     if (hint) {
-      if (factory) hint.textContent = "当前为原厂恢复模式（skip=yes）；Phase 1 未接入「重新启用」，滑杆与应用已停用。";
+      if (factory) hint.textContent = "当前为原厂恢复模式（skip=yes）；选择 V_s 后点「重新启用并应用」，会保留两个功能开关之前的选择。";
       else if (state.mode === "unloaded") hint.textContent = "内核模块未加载，无法应用。";
       else if (state.mode === "disabled") hint.textContent = "模块已禁用，无法应用。";
       else if (state.mode === "offline") hint.textContent = "未连接 KernelSU，无法读取或写入。";
@@ -468,14 +469,19 @@
         : "chip_soc → capacity，去掉官方平滑";
     }
 
-    var policy = kv.POLICY === "applied";
+    var policyOn = state.mode === "decoupled" && kv.NO_POLICY !== "yes";
     var ss = $("superSaverSwitch");
     if (ss) {
-      ss.classList.toggle("on", policy);
-      ss.setAttribute("aria-checked", policy ? "true" : "false");
+      ss.classList.toggle("on", policyOn);
+      ss.setAttribute("aria-checked", policyOn ? "true" : "false");
     }
-    setText("superSaverHint",
-      "Phase 2 接入：本阶段只读展示（当前策略：" + policyLabel(kv.POLICY) + "），开关不可切换。");
+    if (state.mode === "factory") {
+      setText("superSaverHint", "原厂恢复模式：策略已恢复，重新启用后按之前的开关选择执行");
+    } else if (kv.NO_POLICY === "yes") {
+      setText("superSaverHint", "已关闭：允许系统在 1% 时进入超级省电；不影响 ADSP");
+    } else {
+      setText("superSaverHint", "设备策略已应用；关闭后仅恢复策略，不影响 ADSP");
+    }
   }
 
   function renderGrid() {
@@ -672,8 +678,8 @@
   function applyVoltage() {
     if (!state.connected) { toast("未连接 KernelSU"); return; }
     if (state.busy) return;
-    if (state.mode !== "decoupled") {
-      toast(state.mode === "factory" ? "原厂恢复模式：Phase 1 未接入「重新启用」" : "当前模式不可应用");
+    if (state.mode !== "decoupled" && state.mode !== "factory") {
+      toast("当前模式不可应用");
       return;
     }
     var raw = String(state.vs);
@@ -681,7 +687,11 @@
     var v = parseInt(raw, 10);
     if (!(v >= MIN_MV && v <= MAX_MV)) { toast("数值无效：V_s 需 2800–3060"); return; }
     state.dirty = false;
-    runOp("apply " + v, "应用");
+    if (state.mode === "factory") {
+      runOp("enable " + v, "重新启用 " + v + " mV");
+    } else {
+      runOp("apply " + v, "应用 " + v + " mV");
+    }
   }
 
   function doRestore() {
@@ -705,6 +715,14 @@
     if (state.mode !== "decoupled") { toast("当前模式不可切换"); return; }
     var next = (state.status && state.status.NO_REAL_SOC === "yes") ? 1 : 0;
     runOp("set-real-soc " + next, next ? "开启真实电量" : "关闭真实电量");
+  }
+
+  function togglePolicy() {
+    if (!state.connected) { toast("未连接 KernelSU"); return; }
+    if (state.busy) return;
+    if (state.mode !== "decoupled") { toast("当前模式不可切换"); return; }
+    var next = (state.status && state.status.NO_POLICY === "yes") ? "on" : "off";
+    runOp("policy " + next, next === "on" ? "开启禁止 1% 超级省电" : "关闭禁止 1% 超级省电");
   }
 
   function loadLog() {
@@ -764,6 +782,8 @@
     if (restore) restore.addEventListener("click", doRestore);
     var sw = $("realSocSwitch");
     if (sw) sw.addEventListener("click", toggleRealSoc);
+    var ss = $("superSaverSwitch");
+    if (ss) ss.addEventListener("click", togglePolicy);
 
     var refresh = $("refreshBtn");
     if (refresh) refresh.addEventListener("click", refreshStatus);
