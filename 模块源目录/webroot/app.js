@@ -324,6 +324,16 @@
     if (refresh2) refresh2.disabled = !connected || busy;
     var logBtn = $("logBtn");
     if (logBtn) logBtn.disabled = !connected || busy;
+
+    var canAdv = connected && !busy && dec;
+    var capture = $("captureBtn");
+    if (capture) capture.disabled = !canAdv;
+    var readAdsp = $("readAdspBtn");
+    if (readAdsp) readAdsp.disabled = !canAdv;
+    var confirm = $("adspConfirm");
+    if (confirm) confirm.disabled = !canAdv;
+    var write = $("writeAdspBtn");
+    if (write) write.disabled = !canAdv || !confirm || !confirm.checked;
   }
 
   function renderHeader() {
@@ -500,6 +510,12 @@
     setGood("policyCell", kv.POLICY === "applied");
   }
 
+  function renderAdvanced() {
+    var kv = state.status || {};
+    var v = kv.ADSP_READ;
+    setText("adspReadout", v && v !== "NA" ? v + " mV" : "—");
+  }
+
   function renderNotices() {
     clearNotices();
     if (!state.connected || state.mode === "offline") {
@@ -573,6 +589,7 @@
     renderRestore();
     renderFeatures();
     renderGrid();
+    renderAdvanced();
     renderNotices();
     syncDisabled();
   }
@@ -819,6 +836,39 @@
     toast("已刷新状态");
   }
 
+  function captureDev() {
+    if (!state.connected || state.busy) return;
+    if (state.mode !== "decoupled") { toast("当前模式不可捕获"); return; }
+    runOp("capture-dev", "捕获设备指针").then(function (kv) {
+      if (kv && kv.ADSP_READ) setText("adspReadout", kv.ADSP_READ + " mV");
+    });
+  }
+
+  function readAdsp() {
+    if (!state.connected || state.busy) return;
+    if (state.mode !== "decoupled") { toast("当前模式不可读取"); return; }
+    runOp("read-adsp", "读取 ADSP").then(function (kv) {
+      if (kv && kv.ADSP_READ) setText("adspReadout", kv.ADSP_READ + " mV");
+    });
+  }
+
+  function writeAdsp() {
+    if (!state.connected || state.busy) return;
+    if (state.mode !== "decoupled") { toast("当前模式不可写入"); return; }
+    var input = $("adspInput");
+    var confirm = $("adspConfirm");
+    if (!confirm || !confirm.checked) { toast("请先勾选风险确认"); return; }
+    var raw = input ? String(input.value).trim() : "";
+    if (!/^\d{1,4}$/.test(raw)) { toast("请输入 2000–5000 的整数"); return; }
+    var v = parseInt(raw, 10);
+    if (v < 2000 || v > 5000) { toast("ADSP 范围 2000–5000 mV"); return; }
+    if (!window.confirm("确认手动写入 ADSP = " + v + " mV？\n这会影响电量计 0% 位置，日常请用 V_s 派生。")) return;
+    runOp("write-adsp " + v, "写入 ADSP " + v + " mV").then(function (kv) {
+      if (kv && kv.ADSP_READ) setText("adspReadout", kv.ADSP_READ + " mV");
+      if (kv && kv.RESULT === "ok") { if (input) input.value = ""; if (confirm) confirm.checked = false; syncDisabled(); }
+    });
+  }
+
   function bindEvents() {
     var slider = $("voltageSlider");
     if (slider) {
@@ -858,6 +908,18 @@
 
     var logBtn = $("logBtn");
     if (logBtn) logBtn.addEventListener("click", toggleLog);
+
+    var capture = $("captureBtn");
+    if (capture) capture.addEventListener("click", captureDev);
+    var readAdsp = $("readAdspBtn");
+    if (readAdsp) readAdsp.addEventListener("click", readAdsp);
+    var writeAdspBtn = $("writeAdspBtn");
+    if (writeAdspBtn) writeAdspBtn.addEventListener("click", writeAdsp);
+    var adspConfirm = $("adspConfirm");
+    if (adspConfirm) adspConfirm.addEventListener("change", syncDisabled);
+    var adspInput = $("adspInput");
+    if (adspInput) adspInput.addEventListener("input", syncDisabled);
+
     var closeLog = $("closeLog");
     if (closeLog) closeLog.addEventListener("click", function () {
       var box = $("logBox");
