@@ -29,6 +29,7 @@ _uv_verify_core() {
     _uvc_bl=$(_uv_bind_layers)
     _uvc_bg=$(_uv_bind_global)
     _uvc_nrs=$(_uv_yesno "$BK/no_real_soc")
+    _uvc_np=$(_uv_yesno "$BK/no_policy")
     _uvc_applied=$(_uv_yesno "$BK/applied")
 
     _uvc_bexp=1
@@ -45,7 +46,11 @@ _uv_verify_core() {
     fi
 
     _uvc_pok=0
-    [ "$_uvc_applied" = yes ] && _uvc_pok=1
+    if [ "$_uvc_skipnow" = yes ] || [ "$_uvc_np" = yes ]; then
+        [ "$_uvc_applied" = no ] && _uvc_pok=1
+    else
+        [ "$_uvc_applied" = yes ] && _uvc_pok=1
+    fi
 
     _uvc_verify=ok
     [ "$_uvc_tok" = 1 ] && [ "$_uvc_aok" = 1 ] && [ "$_uvc_vok" = 1 ] && [ "$_uvc_sok" = 1 ] || _uvc_verify=mismatch
@@ -76,6 +81,7 @@ _uv_verify_core() {
     printf 'BIND_LAYERS=%s\n' "$_uvc_bl"
     printf 'BIND_GLOBAL=%s\n' "$_uvc_bg"
     printf 'NO_REAL_SOC=%s\n' "$_uvc_nrs"
+    printf 'NO_POLICY=%s\n' "$_uvc_np"
     printf 'APPLIED=%s\n' "$_uvc_applied"
     printf 'TARGET_OK=%s\n' "$_uvc_tok"
     printf 'ADSP_OK=%s\n' "$_uvc_aok"
