@@ -624,12 +624,17 @@ cmd_set_policy() {
 # ---------- 后台操作（避免 ksu.exec 同步桥阻塞 WebView 主线程） ----------
 # JS 调 run-bg 只启动子进程并立即返回；随后用 op-result 轮询结果。
 cmd_run_bg() {
-    if [ "$#" -lt 1 ]; then
+    if [ "$#" -lt 2 ]; then
         printf 'RESULT=fail\nCODE=usage\nDETAIL=run-bg_missing\n'
         return 2
     fi
-    _uvbg_out="$BK/.webui_op.out"
-    _uvbg_rc="$BK/.webui_op.rc"
+    _uvbg_tag=$1
+    shift
+    case "$_uvbg_tag" in
+        *[!A-Za-z0-9_-]*|"") printf 'RESULT=fail\nCODE=usage\nDETAIL=run-bg_tag\n'; return 2 ;;
+    esac
+    _uvbg_out="$BK/.webui_op.$_uvbg_tag.out"
+    _uvbg_rc="$BK/.webui_op.$_uvbg_tag.rc"
     rm -f "$_uvbg_out" "$_uvbg_rc"
     # 双 fork + setsid + 关闭继承 fd：让真正的命令脱离当前 shell/会话。
     # 只重定向还不够——子 shell 继承的 fd 会让 ksu.exec 同步桥等到命令结束。
@@ -640,10 +645,16 @@ cmd_run_bg() {
 }
 
 cmd_op_result() {
-    if [ -f "$BK/.webui_op.rc" ]; then
-        cat "$BK/.webui_op.out" 2>/dev/null
-        printf 'RC=%s\n' "$(cat "$BK/.webui_op.rc" 2>/dev/null)"
-        rm -f "$BK/.webui_op.out" "$BK/.webui_op.rc"
+    _uvbg_tag=${1:-op}
+    case "$_uvbg_tag" in
+        *[!A-Za-z0-9_-]*|"") printf 'RESULT=fail\nCODE=usage\nDETAIL=op-result_tag\n'; return 2 ;;
+    esac
+    _uvbg_out="$BK/.webui_op.$_uvbg_tag.out"
+    _uvbg_rc="$BK/.webui_op.$_uvbg_tag.rc"
+    if [ -f "$_uvbg_rc" ]; then
+        cat "$_uvbg_out" 2>/dev/null
+        printf 'RC=%s\n' "$(cat "$_uvbg_rc" 2>/dev/null)"
+        rm -f "$_uvbg_out" "$_uvbg_rc"
     else
         printf 'RESULT=busy\nCODE=running\n'
     fi
@@ -656,7 +667,8 @@ case "${1:-}" in
         cmd_run_bg "$@"
         ;;
     op-result)
-        cmd_op_result
+        shift
+        cmd_op_result "$@"
         ;;
     status)
         cmd_status

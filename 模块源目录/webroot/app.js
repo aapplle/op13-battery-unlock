@@ -601,20 +601,50 @@
     renderAll();
   }
 
+  function waitStatus() {
+    var startedAt = Date.now();
+    function poll() {
+      if (Date.now() - startedAt > 20000) {
+        statusLoading = false;
+        showError("bad_status", "status 超时，请重试。");
+        return;
+      }
+      execAsync(sh("op-result status"), 5000).then(function (r) {
+        var kv = parseKV(r.out);
+        if (kv.RESULT === "busy") {
+          setTimeout(poll, 400);
+          return;
+        }
+        statusLoading = false;
+        if (!kv.RESULT) {
+          showError("bad_status", "status 无输出：code=" + r.code + " err=" + clip(r.err || "none", 300));
+          return;
+        }
+        applyStatus(r.out);
+      });
+    }
+    poll();
+  }
+
   function loadStatus() {
     if (!hasKsu()) { goOffline(); return; }
     if (statusLoading) return;
     statusLoading = true;
-    // 只用异步 exec：KSU 的同步 exec 会阻塞 WebView UI 线程，
-    // 首次打开/刷新/操作后都会明显卡顿；异步回调不阻塞渲染。
-    execAsync(sh("status"), 20000).then(function (r) {
-      statusLoading = false;
-      if (r.code === -1) { goOffline(); return; }
-      if (!r.out) {
-        showError("bad_status", "status 无输出：code=" + r.code + " err=" + clip(r.err || "none", 300));
+    // 连 status 也放后台：刷新/轮询时同步桥仍会占住 WebView，
+    // 用 run-bg 只启动子进程，再短轮询 op-result。
+    execAsync(sh("run-bg status status"), 5000).then(function (r) {
+      if (r.code === -1) {
+        statusLoading = false;
+        goOffline();
         return;
       }
-      applyStatus(r.out);
+      var kv = parseKV(r.out);
+      if (kv.CODE !== "started") {
+        statusLoading = false;
+        showError("bad_status", "status 启动失败：code=" + r.code + " " + clip(r.err || r.out || "无输出", 300));
+        return;
+      }
+      waitStatus();
     });
   }
 
@@ -648,7 +678,7 @@
           resolve(null);
           return;
         }
-        execAsync(sh("op-result"), 5000).then(function (res) {
+        execAsync(sh("op-result op"), 5000).then(function (res) {
           var kv = parseKV(res.out);
           if (kv.RESULT === "busy") {
             setTimeout(poll, 600);
@@ -678,7 +708,7 @@
     setBusy(true);
     // run-bg 只启动子进程并立即返回；真正命令在后台执行，
     // 避免 ksu.exec 同步桥把 WebView 主线程卡住整个命令时长。
-    return execAsync(sh("run-bg " + sub), 5000).then(function (res) {
+    return execAsync(sh("run-bg op " + sub), 5000).then(function (res) {
       if (res.code === -1) {
         setBusy(false);
         showError("no_ksu", "KernelSU 执行接口不可用。");
