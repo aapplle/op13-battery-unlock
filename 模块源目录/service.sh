@@ -315,109 +315,18 @@ elif [ -w "$P/adsp_read" ]; then
         fi
     fi
 fi
-# --- 3) ★ 显示真实电量：bind-mount chip_soc -> capacity ---------------
-# 官方 capacity 走的是 OPPO oplus_comm 那一层的平滑值，高负载持续放电时会
-# 严重滞后（实测 13W 放电 22 分钟，真实 79% 而显示 91%，差 13 个点）。
-# 把电量计真实 SOC 绑定到 capacity，让状态栏/框架都看到真实值。
-# 可用 touch $BK/no_real_soc 关闭此功能。
-#
-# ⚠️ mount namespace 说明：
-#   标准启动时本脚本由 init 拉起，处于全局 mount namespace，bind 全局生效。
-#   late-load（越狱）模式下 ksud 从提权进程的命名空间 fork，bind 可能只在该
-#   命名空间内可见（状态栏看不到）。此时优先用 nsenter 切入 PID 1 的命名空间。
-do_bind() {
-    umount "$CAP" 2>/dev/null
-    mount --bind "$CS" "$CAP" 2>/dev/null
-}
-
-# 幂等设计：无论之前 bind 过多少次，先全部 umount 干净，再重新 bind 一次。
-# 由 log.sh 的 uv_unbind_capacity() 统一实现（含 PID 1 全局命名空间）。
-
-if [ -f "$BK/no_real_soc" ]; then
-    # no_real_soc 语义 = 恢复官方平滑电量 —— 主动解绑，不仅"不绑定"。
-    uv_unbind_capacity "$CAP" "$CAPUE"
-    klog "检测到 no_real_soc 标记，已解绑真实电量显示"
-elif [ -f "$BK/skip" ]; then
-    # skip 语义 = 完全恢复原厂 —— 主动解绑 capacity，不仅"不绑定"。
-    uv_unbind_capacity "$CAP" "$CAPUE"
-    klog "检测到 skip 标记（已手动恢复），已解绑真实电量显示"
-elif [ -e "$CS" ] && [ -e "$CAP" ]; then
-    uv_unbind_capacity "$CAP" "$CAPUE"
-    bound=0
-    if [ "$KSU_LATE_LOAD" = "1" ] && command -v nsenter >/dev/null 2>&1; then
-        # 越狱模式：优先在 PID 1（全局）命名空间里做 bind
-        if nsenter -t 1 -m -- mount --bind "$CS" "$CAP" 2>/dev/null; then
-            bound=1
-            klog "已绑定 chip_soc -> capacity（nsenter -t 1 -m，全局命名空间）"
-        fi
-    fi
-    if [ "$bound" = "0" ] && do_bind; then
-        bound=1
-        klog "已绑定 chip_soc -> capacity（当前命名空间）"
-    fi
-    if [ "$bound" = "1" ]; then
-        # 需要一次 uevent 让 Android 框架重新读取，否则要等下次电量变化
-        echo change > "$CAPUE" 2>/dev/null
-    else
-        klog "bind mount 失败，保留官方平滑电量"
-    fi
+# --- 3) 用户功能：真实电量 / 禁止超级省电（独立偏好）---------------
+# 两个功能不再由 service.sh 无条件覆盖，而是按用户标记执行：
+#   no_real_soc 存在 = 关闭真实电量；默认开启（无文件）
+#   no_policy   存在 = 关闭「禁止 1% 超级省电」；默认开启（无文件）
+#   skip 优先 = 完全恢复原厂：强制解绑 + 恢复策略
+# 实现集中在 lib/features.sh；本脚本只负责按偏好调用，不复制算法。
+if [ -f "$MODDIR/lib/features.sh" ]; then
+    . "$MODDIR/lib/features.sh"
 fi
-
-# --- 4) 禁止低电量强制进入超级省电 ------------------------------------
-# 原理：com.oplus.battery 的 Utils.isSuperPowerSaveDisabled() 读这个设备策略；
-#       true 时低电量强制对话框不再弹出、设置入口隐藏。
-# 服务端 checkPermission() 要求 appId==1000 -> 必须 su 1000。
-if [ -f "$BK/skip" ]; then
-    # skip 语义 = 完全恢复原厂 —— 主动恢复设备策略，不仅"不应用"。
-    # 手动 touch skip 或重装带旧 skip 时，action.sh 的策略恢复可能未执行，
-    # 这里兜底确保策略被恢复。
-    if [ -f "$BK/orig_state" ]; then
-        if [ "$(cat "$BK/orig_state" 2>/dev/null)" = "existed" ]; then
-            if [ -f "$BK/devicepolicy_orig.xml" ]; then
-                cp -f "$BK/devicepolicy_orig.xml" "$XML"
-                chown system:system "$XML" 2>/dev/null
-                chmod 600 "$XML" 2>/dev/null
-            else
-                # 原文件存在但备份丢失 → 不动文件，报警
-                klog "⚠️ 设备策略备份丢失（orig_state=existed 但 devicepolicy_orig.xml 不存在），保留当前文件"
-            fi
-        else
-            rm -f "$XML"
-        fi
-    fi
-    su 1000 -c "service call oplusdevicepolicy 1 s16 $KEY s16 false i32 1" >/dev/null 2>&1
-    rm -f "$BK/applied"
-    klog "检测到 skip 标记（已手动恢复），已恢复设备策略"
-    klog "若要重新自动应用，请 rm $BK/skip"
+if command -v feature_real_soc_sync >/dev/null 2>&1; then
+    feature_real_soc_sync
+    feature_policy_sync
 else
-    if [ ! -f "$BK/applied" ]; then
-        if [ -f "$XML" ]; then
-            cp -f "$XML" "$BK/devicepolicy_orig.xml"
-            echo "existed" > "$BK/orig_state"
-        else
-            echo "absent" > "$BK/orig_state"
-        fi
-        touch "$BK/applied"
-        klog "已备份设备策略原文件（原状态: $(cat "$BK/orig_state")）"
-    fi
-
-    i=0; ok=0
-    while [ $i -lt 60 ]; do
-        OUT=$(su 1000 -c "service call oplusdevicepolicy 4 s16 $KEY i32 1" 2>&1)
-        case "$OUT" in
-            *Parcel*) ok=1; break ;;
-            *"Transaction too large"*)
-                klog "⚠️ oplusdevicepolicy 出现 Transaction too large（/data/system 下策略 XML 堆积）"
-                klog "   请将本日志反馈作者；本次跳过设备策略，不影响其他功能"
-                ok=-1; break ;;
-        esac
-        sleep 1
-        i=$((i+1))
-    done
-    if [ "$ok" = "1" ]; then
-        su 1000 -c "service call oplusdevicepolicy 1 s16 $KEY s16 true i32 1" >/dev/null 2>&1
-        klog "设备策略 $KEY=true（waited ${i}s）"
-    elif [ "$ok" = "0" ]; then
-        klog "⚠️ 等待 oplusdevicepolicy 服务超时（60s），设备策略未应用（下次开机重试）"
-    fi
+    klog "缺少 lib/features.sh，跳过真实电量/策略（ADSP 不受影响）"
 fi

@@ -19,6 +19,8 @@ LOG=$BK/uv2800.log
 LAST=$BK/.webui.last.log
 P=/sys/module/uv2800/parameters
 MOD=/data/adb/modules/uv2800
+XML=/data/system/oplus_devicepolicy_data_customize.xml
+KEY=oplus_diable_super_power_saving_mode
 
 B=/sys/class/oplus_chg/battery
 CAP=/sys/class/power_supply/battery/capacity
@@ -35,6 +37,13 @@ FLOOR=3060
 [ -f "$MODDIR/log.sh" ] && . "$MODDIR/log.sh"
 command -v uv_dt_orig >/dev/null 2>&1 || uv_dt_orig() { return 1; }
 command -v uv_capture_dev >/dev/null 2>&1 || uv_capture_dev() { return 1; }
+klog() {
+    _m="uv2800: $*"
+    echo "$_m" > /dev/kmsg 2>/dev/null
+    mkdir -p "$BK" 2>/dev/null
+    echo "[$(date '+%m-%d %H:%M:%S')] $_m" >> "$LOG" 2>/dev/null
+}
+[ -f "$MODDIR/lib/features.sh" ] && . "$MODDIR/lib/features.sh"
 
 # ---------- 基础读取 ----------
 _uv_num() {
@@ -483,6 +492,7 @@ cmd_status() {
 
     _uvs_skip=$(_uv_yesno "$BK/skip")
     _uvs_nrs=$(_uv_yesno "$BK/no_real_soc")
+    _uvs_np=$(_uv_yesno "$BK/no_policy")
     _uvs_naw=$(_uv_yesno "$BK/no_adsp_write")
     _uvs_bad=$(_uv_yesno "$BK/adsp_orig.bad")
     _uvs_applied=$(_uv_yesno "$BK/applied")
@@ -578,7 +588,7 @@ cmd_status() {
         esac
     fi
 
-    if [ "$_uvs_skip" = yes ]; then
+    if [ "$_uvs_skip" = yes ] || [ "$_uvs_np" = yes ]; then
         _uvs_policy=restored
     elif [ "$_uvs_applied" = yes ]; then
         _uvs_policy=applied
@@ -628,6 +638,7 @@ cmd_status() {
     printf 'CALI=%s\n' "$_uvs_cali"
     printf 'SKIP=%s\n' "$_uvs_skip"
     printf 'NO_REAL_SOC=%s\n' "$_uvs_nrs"
+    printf 'NO_POLICY=%s\n' "$_uvs_np"
     printf 'NO_ADSP_WRITE=%s\n' "$_uvs_naw"
     printf 'ADSP_ORIG=%s\n' "$_uvs_orig"
     printf 'ADSP_ORIG_BAD=%s\n' "$_uvs_bad"
@@ -892,16 +903,22 @@ cmd_set_real_soc() {
         printf 'RESULT=fail\nCODE=skip_mode\nNO_REAL_SOC=%s\n' "$(_uv_yesno "$BK/no_real_soc")"
         exit 1
     fi
+    if ! command -v feature_real_soc_bind >/dev/null 2>&1; then
+        printf 'RESULT=fail\nCODE=internal\nDETAIL=features_missing\n'
+        exit 1
+    fi
 
     if [ "$_uvsr_v" = 0 ]; then
         touch "$BK/no_real_soc"
+        feature_real_soc_unbind
+        _uvsr_rc=$?
     else
         rm -f "$BK/no_real_soc"
+        feature_real_soc_bind
+        _uvsr_rc=$?
     fi
 
     printf 'webui set-real-soc %s\n' "$_uvsr_v" > "$LAST"
-    _uv_run_service >> "$LAST" 2>&1
-    _uvsr_rc=$?
 
     _uvsr_nrs=$(_uv_yesno "$BK/no_real_soc")
     _uvsr_bl=$(_uv_bind_layers)
@@ -942,6 +959,74 @@ cmd_set_real_soc() {
     printf 'DETAIL=rc:%s\n' "$_uvsr_rc"
 }
 
+cmd_set_policy() {
+    _uvsp_v=${1:-}
+    case "$_uvsp_v" in
+        on|1) _uvsp_v=1 ;;
+        off|0) _uvsp_v=0 ;;
+        *) printf 'RESULT=fail\nCODE=invalid_value\n'; exit 1 ;;
+    esac
+
+    _uv_lock
+    _uv_wait_scripts
+    _uv_require_loaded
+    _uv_require_enabled
+
+    if [ -f "$BK/skip" ]; then
+        printf 'RESULT=fail\nCODE=skip_mode\nNO_POLICY=%s\n' "$(_uv_yesno "$BK/no_policy")"
+        exit 1
+    fi
+    if ! command -v feature_policy_apply >/dev/null 2>&1 || ! command -v feature_policy_restore >/dev/null 2>&1; then
+        printf 'RESULT=fail\nCODE=internal\nDETAIL=features_missing\n'
+        exit 1
+    fi
+
+    if [ "$_uvsp_v" = 1 ]; then
+        rm -f "$BK/no_policy"
+        feature_policy_apply
+        _uvsp_rc=$?
+        _uvsp_exp=applied
+    else
+        touch "$BK/no_policy"
+        feature_policy_restore
+        _uvsp_rc=$?
+        _uvsp_exp=restored
+    fi
+
+    printf 'webui policy %s\n' "$_uvsp_v" > "$LAST"
+
+    _uvsp_np=$(_uv_yesno "$BK/no_policy")
+    _uvsp_ap=$(_uv_yesno "$BK/applied")
+    _uvsp_os=$(_uv_orig_state)
+
+    _uvsp_ok=1
+    if [ "$_uvsp_v" = 1 ]; then
+        [ "$_uvsp_np" = no ] && [ "$_uvsp_ap" = yes ] || _uvsp_ok=0
+    else
+        [ "$_uvsp_np" = yes ] && [ "$_uvsp_ap" = no ] || _uvsp_ok=0
+    fi
+    [ "$_uvsp_rc" = 0 ] || _uvsp_ok=0
+
+    if [ "$_uvsp_ok" = 1 ]; then
+        _uvsp_result=ok
+        _uvsp_code=ok
+        _uvsp_verify=ok
+    else
+        _uvsp_result=warn
+        _uvsp_code=policy_failed
+        _uvsp_verify=mismatch
+    fi
+
+    printf 'RESULT=%s\n' "$_uvsp_result"
+    printf 'CODE=%s\n' "$_uvsp_code"
+    printf 'VERIFY=%s\n' "$_uvsp_verify"
+    printf 'POLICY=%s\n' "$_uvsp_exp"
+    printf 'NO_POLICY=%s\n' "$_uvsp_np"
+    printf 'APPLIED=%s\n' "$_uvsp_ap"
+    printf 'ORIG_STATE=%s\n' "$_uvsp_os"
+    printf 'DETAIL=rc:%s\n' "$_uvsp_rc"
+}
+
 # ---------- 入口 ----------
 case "${1:-}" in
     status)
@@ -962,6 +1047,10 @@ case "${1:-}" in
     set-real-soc)
         shift
         cmd_set_real_soc "$@"
+        ;;
+    policy|set-policy)
+        shift
+        cmd_set_policy "$@"
         ;;
     log)
         shift

@@ -101,12 +101,12 @@ if [ -f "$BK/adsp_orig.txt" ]; then
     echo "- ⚠️ 电量计终止电压可能仍不是原值（本脚本无法回写 ADSP）"
     echo "-    原值记录保留在 $BK/adsp_orig.txt = $(cat "$BK/adsp_orig.txt") mV"
     rm -f "$BK/applied" "$BK/orig_state" "$BK/devicepolicy_orig.xml"
-    rm -f "$BK/target_mv" "$BK/no_adsp_write" "$BK/no_real_soc" 2>/dev/null
+    rm -f "$BK/target_mv" "$BK/no_adsp_write" "$BK/no_real_soc" "$BK/no_policy" 2>/dev/null
     rm -f "$BK/adsp_state" 2>/dev/null   # 模块已卸载，写入记录不再可信
 else
     # 保留日志文件（uv2800.log），只清理状态标记，便于用户反馈问题
     rm -f "$BK/applied" "$BK/orig_state" "$BK/devicepolicy_orig.xml"
-    rm -f "$BK/target_mv" "$BK/no_adsp_write" "$BK/no_real_soc" 2>/dev/null
+    rm -f "$BK/target_mv" "$BK/no_adsp_write" "$BK/no_real_soc" "$BK/no_policy" 2>/dev/null
     rm -f "$BK/adsp_state" 2>/dev/null   # 模块已卸载，写入记录不再可信
 fi
 
