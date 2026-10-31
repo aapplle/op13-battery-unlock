@@ -14,19 +14,11 @@
 # ============================================================
 
 feature_real_soc_bind() {
-    if [ ! -e "$CS" ] || [ ! -e "$CAP" ]; then
-        klog "bind 源/目标不存在，保留官方平滑电量"
-        return 1
-    fi
     uv_unbind_capacity "$CAP" "$CAPUE"
     _frs_bound=0
-    _frs_ns=0
-    _frs_a=$(readlink /proc/self/ns/mnt 2>/dev/null)
-    _frs_b=$(readlink /proc/1/ns/mnt 2>/dev/null)
-    if [ -n "$_frs_a" ] && [ -n "$_frs_b" ] && [ "$_frs_a" != "$_frs_b" ]; then
-        _frs_ns=1
-    fi
-    if { [ "$KSU_LATE_LOAD" = "1" ] || [ "$_frs_ns" = "1" ]; } && command -v nsenter >/dev/null 2>&1; then
+    # 先试 PID 1 全局命名空间：late-load / WebUI root shell 的当前 ns
+    # 可能看不到 chip_soc/capacity，不能先做存在性检查。
+    if command -v nsenter >/dev/null 2>&1; then
         if nsenter -t 1 -m -- mount --bind "$CS" "$CAP" 2>/dev/null; then
             _frs_bound=1
             klog "已绑定 chip_soc -> capacity（nsenter -t 1 -m，全局命名空间）"

@@ -24,12 +24,14 @@ KEY=oplus_diable_super_power_saving_mode
 
 B=/sys/class/oplus_chg/battery
 CAP=/sys/class/power_supply/battery/capacity
+CAPUE=/sys/class/power_supply/battery/uevent
 VOLT=/sys/class/power_supply/battery/voltage_now
 TEMP=/sys/class/power_supply/battery/temp
 DDRC=/sys/devices/virtual/oplus_chg/common/deep_dischg_counts
 CALI=/sys/devices/virtual/oplus_chg/common/deep_dischg_count_cali
 VBAT=$B/vbat_uv
 CHIP=$B/chip_soc
+CS=$CHIP
 CC=$B/battery_cc
 BTYPE=$B/battery_type
 FLOOR=3060

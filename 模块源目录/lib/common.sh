@@ -139,8 +139,8 @@ _uv_profile() {
         _uvpr_v=$(grep 'profile=' "$LOG" 2>/dev/null | tail -1 | sed -n 's/.*profile=\[\([^]]*\)\].*/\1/p')
     fi
     case "$_uvpr_v" in
-        *cos16*|*cos17*) printf 'cos16_17' ;;
-        *cos15*) printf 'cos15' ;;
+        *"ColorOS 16"*|*"ColorOS 17"*|*cos16*|*cos17*) printf 'cos16_17' ;;
+        *"ColorOS 15"*|*cos15*) printf 'cos15' ;;
         *none*) printf 'none' ;;
         *) printf 'unknown' ;;
     esac

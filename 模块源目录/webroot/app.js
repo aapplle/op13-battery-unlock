@@ -590,7 +590,8 @@
   function applyStatus(text) {
     var kv = parseKV(text);
     if (!kv.MODE && !kv.RESULT) {
-      showError("bad_status", "无法解析 webui.sh status 输出：请确认模块版本与 webui.sh 已安装。");
+      showError("bad_status", "无法解析 webui.sh status 输出（len=" + String(text || "").length +
+        "）：" + clip(String(text || ""), 300));
       return;
     }
     state.connected = true;
@@ -616,13 +617,22 @@
     statusLoading = true;
     var sync = execSyncRaw(sh("status"));
     if (sync && sync.ok && sync.out) {
-      statusLoading = false;
-      applyStatus(sync.out);
-      return;
+      var skv = parseKV(sync.out);
+      if (skv.MODE || skv.RESULT) {
+        statusLoading = false;
+        applyStatus(sync.out);
+        return;
+      }
     }
+    // KSU 3.3.1 的同步 exec 在部分管理器上只回最后一行；
+    // 解析失败时改用异步回调拿完整 stdout。
     execAsync(sh("status"), 20000).then(function (r) {
       statusLoading = false;
       if (r.code === -1) { goOffline(); return; }
+      if (!r.out) {
+        showError("bad_status", "异步 exec 无输出：code=" + r.code + " err=" + clip(r.err || "none", 300));
+        return;
+      }
       applyStatus(r.out);
     });
   }
@@ -729,12 +739,16 @@
     var pre = $("logText");
     if (!pre) return;
     if (!state.connected) { pre.textContent = "未连接 KernelSU"; return; }
-    var sync = execSyncRaw(sh("log " + LOG_TAIL));
-    if (sync && sync.ok) {
-      pre.textContent = sync.out ? sync.out : "（日志为空）";
-      return;
-    }
-    pre.textContent = "读取日志失败：KernelSU 同步执行不可用。";
+    // 同步 exec 在部分 KSU 管理器只回最后一行，日志必须走异步完整 stdout。
+    execAsync(sh("log " + LOG_TAIL), 20000).then(function (r) {
+      if (r.out) { pre.textContent = r.out; return; }
+      var sync = execSyncRaw(sh("log " + LOG_TAIL));
+      if (sync && sync.ok) {
+        pre.textContent = sync.out ? sync.out : "（日志为空）";
+        return;
+      }
+      pre.textContent = "读取日志失败：code=" + r.code + " " + (r.err || "无输出");
+    });
   }
 
   function toggleLog() {
