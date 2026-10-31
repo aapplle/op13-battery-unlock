@@ -82,16 +82,6 @@
     return "sh " + moduleDir + "/webui.sh " + sub;
   }
 
-  function execSyncRaw(cmd) {
-    try {
-      var out = window.ksu.exec(cmd);
-      if (out && typeof out.then === "function") return null;
-      return { ok: true, out: String(out == null ? "" : out) };
-    } catch (e) {
-      return { ok: false, out: "", err: String((e && e.message) || e) };
-    }
-  }
-
   function execAsync(cmd, timeoutMs) {
     timeoutMs = timeoutMs || OP_TIMEOUT_MS;
     return new Promise(function (resolve) {
@@ -615,22 +605,13 @@
     if (!hasKsu()) { goOffline(); return; }
     if (statusLoading) return;
     statusLoading = true;
-    var sync = execSyncRaw(sh("status"));
-    if (sync && sync.ok && sync.out) {
-      var skv = parseKV(sync.out);
-      if (skv.MODE || skv.RESULT) {
-        statusLoading = false;
-        applyStatus(sync.out);
-        return;
-      }
-    }
-    // KSU 3.3.1 的同步 exec 在部分管理器上只回最后一行；
-    // 解析失败时改用异步回调拿完整 stdout。
+    // 只用异步 exec：KSU 的同步 exec 会阻塞 WebView UI 线程，
+    // 首次打开/刷新/操作后都会明显卡顿；异步回调不阻塞渲染。
     execAsync(sh("status"), 20000).then(function (r) {
       statusLoading = false;
       if (r.code === -1) { goOffline(); return; }
       if (!r.out) {
-        showError("bad_status", "异步 exec 无输出：code=" + r.code + " err=" + clip(r.err || "none", 300));
+        showError("bad_status", "status 无输出：code=" + r.code + " err=" + clip(r.err || "none", 300));
         return;
       }
       applyStatus(r.out);
@@ -680,7 +661,8 @@
       showError("internal", String((e && e.message) || e));
       return null;
     }).then(function (kv) {
-      if (kv) loadStatus();
+      // 成功或失败都重新拉一次真实状态，确保乐观 UI 能回滚。
+      if (hasKsu()) loadStatus();
       return kv;
     });
   }
@@ -724,6 +706,12 @@
     if (state.busy) return;
     if (state.mode !== "decoupled") { toast("当前模式不可切换"); return; }
     var next = (state.status && state.status.NO_REAL_SOC === "yes") ? 1 : 0;
+    // 先乐观更新开关，命令在后台异步执行；失败时 runOp 会重新拉 status 回滚。
+    if (state.status) {
+      state.status.NO_REAL_SOC = next ? "no" : "yes";
+      renderFeatures();
+      syncDisabled();
+    }
     runOp("set-real-soc " + next, next ? "开启真实电量" : "关闭真实电量");
   }
 
@@ -732,6 +720,11 @@
     if (state.busy) return;
     if (state.mode !== "decoupled") { toast("当前模式不可切换"); return; }
     var next = (state.status && state.status.NO_POLICY === "yes") ? "on" : "off";
+    if (state.status) {
+      state.status.NO_POLICY = next === "on" ? "no" : "yes";
+      renderFeatures();
+      syncDisabled();
+    }
     runOp("policy " + next, next === "on" ? "开启禁止 1% 超级省电" : "关闭禁止 1% 超级省电");
   }
 
@@ -739,14 +732,9 @@
     var pre = $("logText");
     if (!pre) return;
     if (!state.connected) { pre.textContent = "未连接 KernelSU"; return; }
-    // 同步 exec 在部分 KSU 管理器只回最后一行，日志必须走异步完整 stdout。
+    // 只用异步 exec，避免同步调用阻塞 WebView 主线程。
     execAsync(sh("log " + LOG_TAIL), 20000).then(function (r) {
       if (r.out) { pre.textContent = r.out; return; }
-      var sync = execSyncRaw(sh("log " + LOG_TAIL));
-      if (sync && sync.ok) {
-        pre.textContent = sync.out ? sync.out : "（日志为空）";
-        return;
-      }
       pre.textContent = "读取日志失败：code=" + r.code + " " + (r.err || "无输出");
     });
   }
