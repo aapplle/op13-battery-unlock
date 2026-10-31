@@ -637,33 +637,65 @@
       (code ? "：CODE=" + code : ""));
   }
 
+  function waitOp(label) {
+    var startedAt = Date.now();
+    return new Promise(function (resolve) {
+      function poll() {
+        if (Date.now() - startedAt > OP_TIMEOUT_MS) {
+          setBusy(false);
+          showError("timeout", "操作超时，请查看日志。");
+          if (hasKsu()) loadStatus();
+          resolve(null);
+          return;
+        }
+        execAsync(sh("op-result"), 5000).then(function (res) {
+          var kv = parseKV(res.out);
+          if (kv.RESULT === "busy") {
+            setTimeout(poll, 600);
+            return;
+          }
+          setBusy(false);
+          if (!kv.RESULT) {
+            showError("exec_failed", "操作结果读取失败（exit=" + res.code + "）。" +
+              clip(res.err || res.out || "无输出", 400));
+            if (hasKsu()) loadStatus();
+            resolve(null);
+            return;
+          }
+          handleResult(kv, label);
+          if (hasKsu()) loadStatus();
+          resolve(kv);
+        });
+      }
+      poll();
+    });
+  }
+
   function runOp(sub, label) {
     if (!state.connected || state.busy) return Promise.resolve(null);
     if (!hasKsu()) { goOffline(); return Promise.resolve(null); }
     hideError();
     setBusy(true);
-    return execAsync(sh(sub), OP_TIMEOUT_MS).then(function (res) {
-      setBusy(false);
+    // run-bg 只启动子进程并立即返回；真正命令在后台执行，
+    // 避免 ksu.exec 同步桥把 WebView 主线程卡住整个命令时长。
+    return execAsync(sh("run-bg " + sub), 5000).then(function (res) {
       if (res.code === -1) {
+        setBusy(false);
         showError("no_ksu", "KernelSU 执行接口不可用。");
         return null;
       }
       var kv = parseKV(res.out);
-      if (!kv.RESULT) {
-        showError("exec_failed", "命令未返回 RESULT（exit=" + res.code + "）。" +
+      if (kv.CODE !== "started") {
+        setBusy(false);
+        showError("exec_failed", "后台任务启动失败（exit=" + res.code + "）。" +
           clip(res.err || res.out || "无输出", 400));
         return null;
       }
-      handleResult(kv, label);
-      return kv;
+      return waitOp(label);
     })["catch"](function (e) {
       setBusy(false);
       showError("internal", String((e && e.message) || e));
       return null;
-    }).then(function (kv) {
-      // 成功或失败都重新拉一次真实状态，确保乐观 UI 能回滚。
-      if (hasKsu()) loadStatus();
-      return kv;
     });
   }
 
