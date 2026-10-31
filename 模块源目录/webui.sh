@@ -298,14 +298,17 @@ cmd_write_adsp() {
     fi
 
     printf 'webui write-adsp %s\n' "$_uvw_v" > "$LAST"
+    klog "webui 手动写 ADSP 请求: ${_uvw_v} mV"
     printf '%s\n' "$_uvw_v" > "$P/adsp_write" 2>/dev/null
     _uvw_rc=$?
     sleep 1
     _uvw_read=$(_uv_read_adsp)
     if [ "$_uvw_read" = "$_uvw_v" ]; then
         printf '%s\n' "$_uvw_v" > "$BK/adsp_state" 2>/dev/null
+        klog "webui 手动写 ADSP 成功: ${_uvw_v} mV（读回 ${_uvw_read}）"
         printf 'RESULT=ok\nCODE=ok\nADSP_READ=%s\nVALUE=%s\nRC=%s\n' "$_uvw_read" "$_uvw_v" "$_uvw_rc"
     else
+        klog "webui 手动写 ADSP 读回不一致: 写入 ${_uvw_v} / 读回 ${_uvw_read}"
         printf 'RESULT=warn\nCODE=readback_mismatch\nADSP_READ=%s\nVALUE=%s\nRC=%s\n' "$_uvw_read" "$_uvw_v" "$_uvw_rc"
     fi
 }

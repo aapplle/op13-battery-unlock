@@ -40,7 +40,8 @@
     status: null,
     vs: MIN_MV,
     dirty: false,
-    logOpen: false
+    logOpen: false,
+    adspReadout: null
   };
 
   var moduleDir = resolveModuleDir();
@@ -511,9 +512,13 @@
   }
 
   function renderAdvanced() {
-    var kv = state.status || {};
-    var v = kv.ADSP_READ;
-    setText("adspReadout", v && v !== "NA" ? v + " mV" : "—");
+    var v = state.adspReadout;
+    setText("adspReadout", v ? v + " mV" : "—");
+  }
+
+  function setAdspReadout(v) {
+    state.adspReadout = (v && v !== "NA") ? String(v) : null;
+    renderAdvanced();
   }
 
   function renderNotices() {
@@ -840,7 +845,7 @@
     if (!state.connected || state.busy) return;
     if (state.mode !== "decoupled") { toast("当前模式不可捕获"); return; }
     runOp("capture-dev", "捕获设备指针").then(function (kv) {
-      if (kv && kv.ADSP_READ) setText("adspReadout", kv.ADSP_READ + " mV");
+      if (kv && kv.ADSP_READ) setAdspReadout(kv.ADSP_READ);
     });
   }
 
@@ -848,7 +853,7 @@
     if (!state.connected || state.busy) return;
     if (state.mode !== "decoupled") { toast("当前模式不可读取"); return; }
     runOp("read-adsp", "读取 ADSP").then(function (kv) {
-      if (kv && kv.ADSP_READ) setText("adspReadout", kv.ADSP_READ + " mV");
+      if (kv && kv.ADSP_READ) setAdspReadout(kv.ADSP_READ);
     });
   }
 
@@ -864,7 +869,7 @@
     if (v < 2000 || v > 5000) { toast("ADSP 范围 2000–5000 mV"); return; }
     if (!window.confirm("确认手动写入 ADSP = " + v + " mV？\n这会影响电量计 0% 位置，日常请用 V_s 派生。")) return;
     runOp("write-adsp " + v, "写入 ADSP " + v + " mV").then(function (kv) {
-      if (kv && kv.ADSP_READ) setText("adspReadout", kv.ADSP_READ + " mV");
+      if (kv && kv.ADSP_READ) setAdspReadout(kv.ADSP_READ);
       if (kv && kv.RESULT === "ok") { if (input) input.value = ""; if (confirm) confirm.checked = false; syncDisabled(); }
     });
   }
