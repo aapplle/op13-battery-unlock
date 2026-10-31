@@ -48,6 +48,7 @@
   var pollTimer = null;
   var toastTimer = null;
   var statusLoading = false;
+  var statusSeq = 0;
   var cbSeq = 0;
 
   function $(id) { return document.getElementById(id); }
@@ -600,6 +601,7 @@
   }
 
   function applyStatus(text) {
+    if (state.busy) return;
     var kv = parseKV(text);
     if (!kv.MODE && !kv.RESULT) {
       showError("bad_status", "无法解析 webui.sh status 输出（len=" + String(text || "").length +
@@ -617,21 +619,24 @@
   }
 
   function goOffline() {
+    invalidateStatus();
     state.connected = false;
     state.status = null;
     state.mode = "offline";
     renderAll();
   }
 
-  function waitStatus() {
+  function waitStatus(seq) {
     var startedAt = Date.now();
     function poll() {
+      if (seq !== statusSeq) return;
       if (Date.now() - startedAt > 20000) {
         statusLoading = false;
         showError("bad_status", "status 超时，请重试。");
         return;
       }
       execAsync(sh("op-result status"), 5000).then(function (r) {
+        if (seq !== statusSeq) return;
         var kv = parseKV(r.out);
         if (kv.RESULT === "busy") {
           setTimeout(poll, 400);
@@ -648,13 +653,20 @@
     poll();
   }
 
+  function invalidateStatus() {
+    statusSeq++;
+    statusLoading = false;
+  }
+
   function loadStatus() {
     if (!hasKsu()) { goOffline(); return; }
     if (statusLoading) return;
     statusLoading = true;
+    var seq = ++statusSeq;
     // 连 status 也放后台：刷新/轮询时同步桥仍会占住 WebView，
     // 用 run-bg 只启动子进程，再短轮询 op-result。
     execAsync(sh("run-bg status status"), 5000).then(function (r) {
+      if (seq !== statusSeq) return;
       if (r.code === -1) {
         statusLoading = false;
         goOffline();
@@ -666,7 +678,7 @@
         showError("bad_status", "status 启动失败：code=" + r.code + " " + clip(r.err || r.out || "无输出", 300));
         return;
       }
-      waitStatus();
+      waitStatus(seq);
     });
   }
 
@@ -729,6 +741,8 @@
     if (!hasKsu()) { goOffline(); return Promise.resolve(null); }
     hideError();
     setBusy(true);
+    // 作废点击前已发出的 status 请求，避免旧状态在操作中把开关视觉回滚。
+    invalidateStatus();
     // run-bg 只启动子进程并立即返回；真正命令在后台执行，
     // 避免 ksu.exec 同步桥把 WebView 主线程卡住整个命令时长。
     return execAsync(sh("run-bg op " + sub), 5000).then(function (res) {
@@ -742,12 +756,14 @@
         setBusy(false);
         showError("exec_failed", "后台任务启动失败（exit=" + res.code + "）。" +
           clip(res.err || res.out || "无输出", 400));
+        if (hasKsu()) loadStatus();
         return null;
       }
       return waitOp(label);
     })["catch"](function (e) {
       setBusy(false);
       showError("internal", String((e && e.message) || e));
+      if (hasKsu()) loadStatus();
       return null;
     });
   }
