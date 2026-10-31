@@ -1,6 +1,6 @@
 id=uv2800
 name=一加13解容
-version=11
-versionCode=34
+version=12
+versionCode=35
 author=枫落1911
-description=关机截止电压自定义（2800~3060mV，默认2800，ADSP 空电点自动派生，默认2540）；电量计按解容后的空电点计算 SOC；显示真实电量、禁止1%强制进入超级省电（两项可在 WebUI 独立开关，默认开启）。卸载前请保证电量>30%，先在 WebUI 中恢复原值再卸载
+description=关机截止电压自定义（2800~3060mV，默认2800）；ADSP term 与四个 votable 全部锁定到 V_s，FCC/QMAX/SOC/mAh 按 V_s 模型计算（满充/放空后更新）；不做温度/老化补偿；显示真实电量、禁止1%强制进入超级省电（两项可在 WebUI 独立开关，默认开启）。卸载前请保证电量>30%，先在 WebUI 中恢复原值再卸载

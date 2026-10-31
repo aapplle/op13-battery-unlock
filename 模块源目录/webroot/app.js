@@ -10,7 +10,6 @@
   var LOG_TAIL = 50;
   var MIN_MV = 2800;
   var MAX_MV = 3060;
-  var FLOOR_MV = 3060;
   var OP_TIMEOUT_MS = 180000;
 
   var CODE_TEXT = {
@@ -172,9 +171,8 @@
   }
 
   function derived(v) {
-    var off = FLOOR_MV - v;
-    if (off < 0) off = 0;
-    return v - off;
+    // 目标态：ADSP term 与关机电压同值，不再派生 2540。
+    return v;
   }
 
   function clamp(n, lo, hi) {

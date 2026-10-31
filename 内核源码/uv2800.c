@@ -7,16 +7,16 @@
 //  ② uv_show：挂钩 vbat_uv_show（sysfs 读出侧），同样返回 uv_target_mv ——
 //             驱动内部值与状态栏读到的值必须一致。
 //  ③ uv_term_get：挂钩 getter 内部 get_off，把驱动从 ADSP 读到的终止电压
-//             （空电点）强制为 uv_adsp_mv（默认 2540）。
+//             （空电点）强制为 uv_target_mv（V_s）。
 //  ④ uv_term_set：挂钩 setter 内部 set_off，驱动纠偏写回时把写入值统一为
-//             uv_adsp_mv。
+//             uv_target_mv（V_s）。
 //  uv_term_entry：在 getter 入口（offset 0）捕获 dev 指针（uv_dev），
 //             供 adsp_read / adsp_write 复用同一个 dev。
 //  uv_ddrc_entry：在 deep_dischg 入口补捕获 uv_dev，不依赖驱动 vote（插拔）。
 //
 //  用户态入口（module param）：
 //    uv_target_mv  关机电压强制值（2000~5000 钳制，默认 2800）
-//    uv_adsp_mv    ADSP 终止电压目标（默认 2540）
+//    uv_adsp_mv    兼容旧脚本的别名，等于 uv_target_mv（V_s）
 //    adsp_read     写任意值 -> 直读 ADSP 里保存的 deep_term_volt 真值
 //    adsp_write    写电压值 -> 主动调用 setter 回写 ADSP
 //    resume        写 1 退出恢复模式（hook 重新生效），写 0 进入
@@ -39,9 +39,8 @@
 //   · 实测：term=2800 时 fcc 4366→4956（+13.5%）；term=2600 时 fcc→~5000；
 //     默认 term=2540 时驱动上报 fcc=5020。
 //   · 原生库仑计量与负载无关 → 高倍率放电天然正确（显示层方案做不到）。
-//   · 关机电压由 ①uv_get hook 强制为运行时参数 uv_target_mv（默认 2800）；
-//     ADSP term 由 uv_adsp_mv 独立设定（默认 2540）。两者数值独立，但 ③ 读值
-//     会进入驱动关机票计算，并非"完全解耦"——详见各 hook 处注释。
+//   · 关机电压、ADSP term、四个 votable 全部锁定为 uv_target_mv（V_s）；
+//     FCC/QMAX/SOC/mAh 按 V_s 模型计算，满充/放空后收敛。
 //
 // ============ 兼容性 ============
 //  挂钩偏移由 profile 表按驱动指令字自适应选择（ColorOS 15 / 16 / 17），
@@ -79,6 +78,11 @@
  *   （service.sh / action.sh 有同款说明。）
  * ------------------------------------------------------------------ */
 static int uv_target_mv = UV_TARGET_MV;
+static int uv_adsp_mv;
+
+/* 目标态：actual deep_term、GAUGE_TERM/TARGET_TERM、GAUGE_SHUTDOWN/TARGET_SHUTDOWN
+ * 全部锁到 uv_target_mv（V_s）。FCC/QMAX 在下一次满充/放空后按 V_s 重算。 */
+static void uv_override_apply(void);
 
 /* uv_target_mv 范围钳制
  * 任意整数都会直接成为 vbat_uv，必须限制在合理范围内
@@ -94,6 +98,8 @@ static int uv_target_mv_set(const char *val, const struct kernel_param *kp)
 		return -EINVAL;
 	}
 	uv_target_mv = v;
+	uv_adsp_mv = v; /* 目标态：term/shutdown 与 V_s 同步，不再独立派生 */
+	uv_override_apply();
 	return 0;
 }
 
@@ -112,23 +118,34 @@ module_param_cb(uv_target_mv, &uv_target_mv_ops, &uv_target_mv, 0644);
 MODULE_PARM_DESC(uv_target_mv, "forced vbat_uv value in mV (default 2800, range 2000~5000)");
 
 /* ------------------------------------------------------------------
- * uv_adsp_mv：ADSP（电量计终止电压 / 空电点）的目标值，独立于 uv_target_mv。
- *
- * 【为什么必须独立】uv_term_get / uv_term_set 若复用 uv_target_mv，解耦态下
- *   ADSP 目标（如 2540）与关机电压（2800）就被混为一谈：③ 让驱动"读到"的值
- *   恰好等于 ④ 会强制成的值，④ 平时因此不触发；但实测（独立审计 §3c.3）
- *   驱动会定期把 ADSP 纠回它在 ③ 处读到的值，那一刻 ④ 会执行并把写入值统一成
- *   目标值 —— ③④ 构成自洽反馈环：③ 决定"驱动以为当前值是多少"，④ 是驱动
- *   纠偏时的保险丝，不是死代码。独立参数让 ③④ 的目标与脚本写入的 ADSP 值一致。
- *   另注：③ 的读值进入驱动关机票计算，所以本参数同时影响空电点与关机票。
- *
- * 【脚本职责】每次 adsp_write 之前，先写本参数保证 ③④ 目标一致：
- *   echo 2540 > /sys/module/uv2800/parameters/uv_adsp_mv
- *   echo 2540 > /sys/module/uv2800/parameters/adsp_write
+ * uv_adsp_mv：兼容旧脚本/旧 WebUI 的别名。
+ * 目标态下 term、shutdown、votable 全部等于 uv_target_mv，因此本参数只做
+ * 双向同步；写它等价于写 uv_target_mv。
  * ------------------------------------------------------------------ */
-static int uv_adsp_mv = 2540;	/* 默认：V_s=2800, FLOOR=3060 -> 2800-(3060-2800)=2540 */
-module_param(uv_adsp_mv, int, 0644);
-MODULE_PARM_DESC(uv_adsp_mv, "ADSP deep_term_volt target in mV (default 2540)");
+static int uv_adsp_mv = UV_TARGET_MV;	/* 兼容旧脚本的别名；目标态等于 V_s */
+
+static int uv_adsp_mv_set(const char *val, const struct kernel_param *kp)
+{
+	int v;
+
+	if (kstrtoint(val, 10, &v))
+		return -EINVAL;
+	if (v < 2000 || v > 5000) {
+		pr_warn("uv2800: uv_adsp_mv %d mV 超出范围 2000~5000，拒绝\n", v);
+		return -EINVAL;
+	}
+	uv_adsp_mv = v;
+	uv_target_mv = v;
+	uv_override_apply();
+	return 0;
+}
+
+static const struct kernel_param_ops uv_adsp_mv_ops = {
+	.set = uv_adsp_mv_set,
+	.get = uv_target_mv_get,
+};
+module_param_cb(uv_adsp_mv, &uv_adsp_mv_ops, &uv_adsp_mv, 0644);
+MODULE_PARM_DESC(uv_adsp_mv, "legacy alias of uv_target_mv; kept equal to V_s");
 
 /* ================= profile（跨版本） ================= */
 struct uv_profile {
@@ -254,6 +271,128 @@ static int uv_detect_profile(void)
 		return 0;
 	}
 	return -ENOENT;
+}
+
+/* ================= votable 强制（目标态核心） =================
+ * 原厂四个 votable 都是 VOTE_MAX：
+ *   GAUGE_TERM_VOLTAGE / TARGET_TERM_VOLTAGE
+ *   GAUGE_SHUTDOWN_VOLTAGE / TARGET_SHUTDOWN_VOLTAGE
+ * 普通 vote() 2800 会输给原厂 3200/3250；只有 vote_override 能压过。
+ * 四个都强制为 uv_target_mv 后：
+ *   adjusted = V_s - V_s + actual_term(V_s) = V_s
+ * gauge 的 FCC/QMAX/SOC/mAh 随之按 V_s 模型，满充/放空后收敛。
+ */
+static void *uv_find_votable_fn;
+static void *uv_vote_override_fn;
+static int uv_override_ok;
+static int uv_override_last_mv;
+
+static const char * const uv_override_names[] = {
+	"GAUGE_TERM_VOLTAGE",
+	"TARGET_TERM_VOLTAGE",
+	"GAUGE_SHUTDOWN_VOLTAGE",
+	"TARGET_SHUTDOWN_VOLTAGE",
+};
+
+static void *uv_kprobe_sym(const char *sym)
+{
+	struct kprobe kp = { .symbol_name = sym };
+	void *addr = NULL;
+
+	if (!register_kprobe(&kp)) {
+		addr = kp.addr;
+		unregister_kprobe(&kp);
+	}
+	return addr;
+}
+
+static noinline __attribute__((no_sanitize("kcfi")))
+void *uv_call_find_votable(const char *name, void *fn)
+{
+	void *(*f)(const char *) = fn;
+
+	return f(name);
+}
+
+static noinline __attribute__((no_sanitize("kcfi")))
+int uv_call_vote_override(void *v, const char *client, bool active, int mv,
+			  bool force, void *fn)
+{
+	int (*f)(void *, const char *, bool, int, bool) = fn;
+
+	return f(v, client, active, mv, force);
+}
+
+static void uv_override_apply(void)
+{
+	int i, found = 0;
+
+	uv_override_ok = 0;
+	if (!uv_find_votable_fn || !uv_vote_override_fn) {
+		uv_find_votable_fn = uv_kprobe_sym("find_votable");
+		uv_vote_override_fn = uv_kprobe_sym("vote_override");
+	}
+	if (!uv_find_votable_fn || !uv_vote_override_fn) {
+		pr_warn_once("uv2800: find_votable/vote_override 不可用，无法 override\n");
+		return;
+	}
+
+	for (i = 0; i < ARRAY_SIZE(uv_override_names); i++) {
+		void *v = uv_call_find_votable(uv_override_names[i],
+					       uv_find_votable_fn);
+		int rc;
+
+		if (!v)
+			continue;
+		rc = uv_call_vote_override(v, "UV2800", true, uv_target_mv,
+					   false, uv_vote_override_fn);
+		if (rc) {
+			pr_warn("uv2800: vote_override %s=%d 失败 rc=%d\n",
+				uv_override_names[i], uv_target_mv, rc);
+			continue;
+		}
+		found++;
+	}
+
+	uv_override_ok = (found == ARRAY_SIZE(uv_override_names));
+	if (found && (uv_override_last_mv != uv_target_mv || !uv_override_ok)) {
+		pr_info("uv2800: votable override %d/%d -> %d mV\n",
+			found, (int)ARRAY_SIZE(uv_override_names), uv_target_mv);
+		uv_override_last_mv = uv_target_mv;
+	}
+}
+
+static int uv_apply_set(const char *val, const struct kernel_param *kp)
+{
+	uv_override_apply();
+	return 0;
+}
+
+static int uv_apply_get(char *buf, const struct kernel_param *kp)
+{
+	return uv_itoa(buf, uv_override_ok ? 1 : 0);
+}
+
+static const struct kernel_param_ops uv_apply_ops = {
+	.set = uv_apply_set,
+	.get = uv_apply_get,
+};
+module_param_cb(uv_apply, &uv_apply_ops, &uv_override_ok, 0644);
+MODULE_PARM_DESC(uv_apply, "write to re-apply four votable overrides; read 1 when all four ready");
+
+static void uv_override_clear(void)
+{
+	int i;
+
+	if (!uv_find_votable_fn || !uv_vote_override_fn)
+		return;
+	for (i = 0; i < ARRAY_SIZE(uv_override_names); i++) {
+		void *v = uv_call_find_votable(uv_override_names[i],
+					       uv_find_votable_fn);
+		if (v)
+			uv_call_vote_override(v, "UV2800", false, 0, false,
+					      uv_vote_override_fn);
+	}
 }
 
 /* ================= 回写 ================= */
@@ -498,10 +637,10 @@ static int uv_show(struct kprobe *p, struct pt_regs *regs)
 }
 
 /* getter 内部挂钩点（get_off 偏移 = "str w<get_reg>,[...]" 指令所在）。
- * 驱动读到的 ADSP term 在即将存回结构体前被强制为 uv_adsp_mv（默认 2540）。
+ * 驱动读到的 ADSP term 在即将存回结构体前被强制为 uv_target_mv（V_s）。
  * 这个读值会进入驱动关机票计算：
  *     shutdown = (TARGET_SHUTDOWN - TARGET_TERM) + getter 读回值
- * （实测：读回 2540 -> shutdown 票 3200），因此 ③ 决定驱动侧关机电压。
+ * 目标态四个 votable 也都是 V_s，因此 adjusted_shutdown = V_s。
  * 必须在 get_off 处改：该偏移之前的指令会刷新目标寄存器，入口改值会被覆盖。*/
 static int uv_term_get(struct kprobe *p, struct pt_regs *regs);
 static struct kprobe kp_term_get = {
@@ -511,7 +650,7 @@ static struct kprobe kp_term_get = {
 static int uv_term_get(struct kprobe *p, struct pt_regs *regs)
 {
 	if (!uv_bypass && !uv_self_read)
-		regs->regs[cur_get_reg] = uv_adsp_mv;	/* 用独立 ADSP 目标 */
+		regs->regs[cur_get_reg] = uv_target_mv;	/* 目标态：term = V_s */
 	return 0;
 }
 
@@ -556,7 +695,7 @@ static int uv_ddrc_entry(struct kprobe *p, struct pt_regs *regs)
 }
 
 /* setter 内部挂钩点（set_off 偏移）：驱动发起纠偏写回时，把写入值统一成
- * uv_adsp_mv（默认 2540）—— 没有它，驱动会把 ADSP 打回它自己算出的 3250。
+ * uv_target_mv（V_s）—— 没有它，驱动会把 ADSP 打回它自己算出的 3250。
  * 平时驱动不做"vote 目标 != 当前 ADSP"的写入，④ 因此不活跃；一旦驱动纠偏
  * 就会执行（独立审计 §3c.3）。*/
 static int uv_term_set(struct kprobe *p, struct pt_regs *regs);
@@ -567,7 +706,7 @@ static struct kprobe kp_term_set = {
 static int uv_term_set(struct kprobe *p, struct pt_regs *regs)
 {
 	if (!uv_bypass && !uv_self_write)
-		regs->regs[cur_set_reg] = uv_adsp_mv;	/* 用独立 ADSP 目标 */
+		regs->regs[cur_set_reg] = uv_target_mv;	/* 目标态：term = V_s */
 	return 0;
 }
 
@@ -628,6 +767,12 @@ static int __init uv2800_init(void)
 	if (!register_kprobe(&kp_ddrc)) n++;
 	else pr_warn("uv2800: kp_ddrc 注册失败（deep_dischg 入口），回退到插拔捕获\n");
 
+	/* 目标态：四个 votable + actual term 全部锁到 V_s。
+	 * votable 尚未创建时，由 service.sh 写 uv_apply 重放。*/
+	uv_override_apply();
+	if (!uv_override_ok)
+		pr_info("uv2800: votable 尚未就绪，等待 service.sh 写 uv_apply\n");
+
 	pr_info("uv2800: v11 ready, %d 个 hook, profile=[%s], vbat_uv=%d adsp=%d\n",
 		n, cur_profile, uv_target_mv, uv_adsp_mv);
 	pr_info("uv2800: 回写入口 /sys/module/uv2800/parameters/adsp_write（写电压值，如 3250）\n");
@@ -636,6 +781,7 @@ static int __init uv2800_init(void)
 
 static void __exit uv2800_exit(void)
 {
+	uv_override_clear();
 	if (kp_ddrc.addr)        unregister_kprobe(&kp_ddrc);
 	if (kp_term_entry.addr)  unregister_kprobe(&kp_term_entry);
 	if (kp_term_set.addr)    unregister_kprobe(&kp_term_set);

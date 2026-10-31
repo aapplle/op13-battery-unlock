@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="light dark">
 <title>一加13解容 · WebUI</title>
-<link rel="stylesheet" href="style.css?v=34p">
+<link rel="stylesheet" href="style.css?v=35p">
 </head>
 <body>
 <div class="app" id="app">
@@ -68,14 +68,14 @@
       <div class="section-head">
         <div>
           <h2>关机电压</h2>
-          <p>V_s 决定多低的电压关机，ADSP 由它自动派生</p>
+          <p>V_s 同时决定关机电压、ADSP term、FCC/QMAX 计算基准</p>
         </div>
         <span class="tag" id="voltageTag">2800–3060</span>
       </div>
 
       <div class="voltage-row">
         <div class="big"><span id="voltageValue">2800</span><small>mV</small></div>
-        <div class="derived">ADSP 派生 <b id="derivedAdsp">—</b> <span id="derivedUnit"></span></div>
+        <div class="derived">ADSP 目标 <b id="derivedAdsp">—</b> <span id="derivedUnit"></span></div>
       </div>
 
       <input type="range" id="voltageSlider" min="2800" max="3060" step="10" value="2800" aria-label="关机电压">
@@ -177,7 +177,7 @@
         <div class="adv-write-head"><b>手动写 ADSP</b><span>最近读取：<b id="adspReadout">—</b></span></div>
         <p class="hint">直接写电量计 deep_term_volt，仅用于诊断/验证。范围 2000–5000 mV；写入后会读回校验。日常请用上方 V_s 派生。</p>
         <div class="adv-write-row">
-          <input class="adv-input" id="adspInput" type="number" inputmode="numeric" min="2000" max="5000" step="10" placeholder="例如 2540">
+          <input class="adv-input" id="adspInput" type="number" inputmode="numeric" min="2000" max="5000" step="10" placeholder="例如 2800">
           <button class="btn danger" id="writeAdspBtn" type="button" disabled>写入</button>
         </div>
         <label class="check adv-check"><input id="adspConfirm" type="checkbox"> 我已知晓：手动写 ADSP 可能影响电量计/关机点</label>
@@ -198,6 +198,6 @@
 </div>
 
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
-<script src="app.js?v=34p"></script>
+<script src="app.js?v=35p"></script>
 </body>
 </html>

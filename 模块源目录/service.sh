@@ -2,7 +2,7 @@
 # ============================================================
 # uv2800 - service.sh（服务阶段；标准启动与 late-load 越狱模式都会执行）
 #   1) 兜底 insmod（late-load 下由 late-load.sh 加载，这里是双保险）
-#   2) ★ 原生 SOC 校准：把电量计终止电压设为 ADSP_TARGET（由关机电压 V_s 派生，默认 V_s=2800 -> ADSP=2540）
+#   2) ★ 原生 SOC 校准：把 ADSP term、四个 votable 全部锁定为 V_s（默认 2800）
 #   3) ★ 显示真实电量：bind-mount chip_soc -> capacity（去掉官方平滑滞后）
 #   4) 禁止低电量强制进入超级省电（OPPO 设备策略，COS15/16/17 通用）
 #
@@ -30,7 +30,7 @@ klog() { uv_log "$@"; }
 # 【为什么必须判据】曾实测到 adsp_orig.txt 被备份成 2600（解耦目标）/2800（hook 污染值），
 # 导致 action.sh 回写把 2800 当"原值"写回（真原值 3250）—— 备份一旦被污染，
 # 之后所有恢复路径都会跟着用错值。
-# 【判据】原值必须大于 FLOOR(3060)：模块可写 ADSP 范围是 [2540, 3060]，
+# 【判据】原值必须大于 FLOOR(3060)：原厂 ADSP 原值在 3060/3250 档；
 # 所以 _v <= 3060 说明 ADSP 可能被本模块（在任何 V_S 下）改写过，此时【拒绝备份】。
 # 误拒安全（DT 兜底结果相同），误接受危险（固化错误值）。
 backup_orig() {
@@ -102,6 +102,23 @@ fi
 
 mkdir -p "$BK"
 
+# votable override 重放：模块 init 时四个 votable 可能尚未创建；
+# 这里写 uv_apply 并读回 1（四个都成功）。
+apply_votables() {
+    _avi=0
+    while [ "$_avi" -lt 10 ]; do
+        echo 1 > "$P/uv_apply" 2>/dev/null
+        [ "$(cat "$P/uv_apply" 2>/dev/null)" = "1" ] && {
+            klog "votable override 已就绪（V_s=$(cat "$P/uv_target_mv" 2>/dev/null) mV）"
+            return 0
+        }
+        _avi=$((_avi + 1))
+        sleep 1
+    done
+    klog "⚠️ votable override 未就绪（uv_apply=$(cat "$P/uv_apply" 2>/dev/null)），请查看 dmesg"
+    return 1
+}
+
 # --- 1.5) ★ 统一退出「恢复模式」（放在分支之前，所有分支都被覆盖）-------
 # 【为什么统一在这里】把 uv_bypass 置 1（放行所有 hook）之后，内核里【没有】
 #   任何自动复位路径，只能由用户态显式写 resume。
@@ -138,11 +155,11 @@ if [ "$_uvd" -le 2000 ] 2>/dev/null; then
     klog "触发后 adsp_read=$(cat "$P/adsp_read" 2>/dev/null)"
 fi
 
-# --- * 关机电压自定义 + ADSP 自动派生 -------------------------------
+# --- * 关机电压自定义 + ADSP 同值锁定 -------------------------------
 # 用户可调：关机电压 V_s（2800~3060，默认 2800），落盘 $BK/target_mv。
-# ADSP 由 V_s 自动派生：偏移 = max(0, FLOOR - V_s)，term = V_s - 偏移。
-# FLOOR=3060（新机原厂关机电压 = 电量计模型的计数下限）。
-# 不再需要用户手改 ADSP 值。
+# 目标态：actual deep_term、GAUGE_TERM/TARGET_TERM、GAUGE_SHUTDOWN/TARGET_SHUTDOWN
+# 全部等于 V_s；FCC/QMAX/SOC/mAh 在下一次满充/放空后按 V_s 重算。
+# 不再派生 2540，也不再做温度/老化补偿。
 if [ ! -f "$BK/target_mv" ]; then
     echo "$TARGET_MV_DEFAULT" > "$BK/target_mv"
     klog "已生成 $BK/target_mv = $TARGET_MV_DEFAULT（关机电压，可调 2800~3060）"
@@ -157,11 +174,9 @@ if [ "$V_S" -lt 2800 ] 2>/dev/null || [ "$V_S" -gt 3060 ] 2>/dev/null; then
     V_S=$TARGET_MV_DEFAULT
     echo "$V_S" > "$BK/target_mv"
 fi
-# 派生 ADSP 目标：偏移 = max(0, FLOOR - V_s)
-_offset=$((FLOOR_MV - V_S))
-[ "$_offset" -lt 0 ] && _offset=0
-ADSP_TARGET=$((V_S - _offset))
-klog "关机电压 V_s=${V_S} mV，ADSP 派生=${ADSP_TARGET} mV（偏移 ${_offset}，FLOOR=${FLOOR_MV}）"
+# 目标态：ADSP term 与关机电压同值，不再派生偏移
+ADSP_TARGET=$V_S
+klog "关机电压 V_s=${V_S} mV，ADSP 目标=${ADSP_TARGET} mV（term/shutdown 同值）"
 
 # --- 2) ★ 原生 SOC 校准：解耦写入电量计终止电压（adsp_write 主动写）---------
 # 【为什么必须主动写】解耦写入【唯一可靠路径】是模块主动 adsp_write：
@@ -315,6 +330,9 @@ elif [ -w "$P/adsp_read" ]; then
         fi
     fi
 fi
+# 重放四个 votable override（skip/正常分支都已设好 uv_target_mv）
+apply_votables
+
 # --- 3) 用户功能：真实电量 / 禁止超级省电（独立偏好）---------------
 # 两个功能不再由 service.sh 无条件覆盖，而是按用户标记执行：
 #   no_real_soc 存在 = 关闭真实电量；默认开启（无文件）
