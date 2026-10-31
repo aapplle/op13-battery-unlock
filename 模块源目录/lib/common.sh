@@ -173,13 +173,11 @@ _uv_loaded() {
 }
 
 _uv_derived() {
+    # 目标态：ADSP term 与关机电压同值，不再派生偏移。
     case "$1" in
         ''|*[!0-9]*) printf 'NA'; return ;;
     esac
-    _uvd_v=$1
-    _uvd_off=$((FLOOR - _uvd_v))
-    [ "$_uvd_off" -lt 0 ] && _uvd_off=0
-    printf '%s' $((_uvd_v - _uvd_off))
+    printf '%s' "$1"
 }
 
 _uv_parse_mv() {

@@ -16,6 +16,7 @@ _uv_verify_core() {
     _uvc_adsp=$(_uv_read_adsp)
     _uvc_vbat=$(_uv_num "$VBAT")
     _uvc_skipnow=$(_uv_yesno "$BK/skip")
+    _uvc_ov=$(_uv_num "$P/uv_apply")
 
     _uvc_tok=0
     [ "$_uvc_pt" = "$_uvc_mv" ] && _uvc_tok=1
@@ -25,6 +26,8 @@ _uv_verify_core() {
     [ "$_uvc_vbat" = "$_uvc_mv" ] && _uvc_vok=1
     _uvc_sok=0
     [ "$_uvc_skipnow" = "$_uvc_skip" ] && _uvc_sok=1
+    _uvc_ook=0
+    [ "$_uvc_ov" = "1" ] && _uvc_ook=1
 
     _uvc_bl=$(_uv_bind_layers)
     _uvc_bg=$(_uv_bind_global)
@@ -58,6 +61,9 @@ _uv_verify_core() {
     if [ "$_uvc_verify" = mismatch ]; then
         _uvc_result=warn
         _uvc_code=write_failed
+    elif [ "$_uvc_ook" = 0 ]; then
+        _uvc_result=warn
+        _uvc_code=override_failed
     elif [ "$_uvc_bok" = 0 ]; then
         _uvc_result=warn
         _uvc_code=bind_failed
@@ -75,6 +81,8 @@ _uv_verify_core() {
     printf 'TARGET=%s\n' "$_uvc_mv"
     printf 'ADSP_DERIVED=%s\n' "$_uvc_exp"
     printf 'ADSP_READ=%s\n' "$_uvc_adsp"
+    printf 'UV_APPLY=%s\n' "$_uvc_ov"
+    printf 'OVERRIDE_OK=%s\n' "$_uvc_ook"
     printf 'VBAT_UV=%s\n' "$_uvc_vbat"
     printf 'PARAM_TARGET=%s\n' "$_uvc_pt"
     printf 'SKIP=%s\n' "$_uvc_skipnow"

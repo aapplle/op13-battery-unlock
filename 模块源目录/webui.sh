@@ -34,7 +34,6 @@ CHIP=$B/chip_soc
 CS=$CHIP
 CC=$B/battery_cc
 BTYPE=$B/battery_type
-FLOOR=3060
 
 [ -f "$MODDIR/log.sh" ] && . "$MODDIR/log.sh"
 command -v uv_dt_orig >/dev/null 2>&1 || uv_dt_orig() { return 1; }
