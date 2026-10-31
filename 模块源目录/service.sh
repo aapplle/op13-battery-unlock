@@ -258,7 +258,7 @@ elif [ -w "$P/adsp_read" ]; then
     # 探测 uv_dev 是否就绪。主动触发捕获后通常 0-1 秒就绪，10 秒足够。
     i=0; cur=""; _probe=ok
     while [ $i -lt 10 ]; do
-        # 用户点「执行」后会出现 skip 标记，立刻停手，不要覆盖用户的恢复
+        # 用户点「恢复原厂」后会出现 skip 标记，立刻停手，不要覆盖用户的恢复
         if [ -f "$BK/skip" ]; then
             klog "检测到 skip 标记（用户已手动恢复），停止解耦探测"
             _probe=skip

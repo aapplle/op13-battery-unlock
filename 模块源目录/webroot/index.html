@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>一加13解容 · WebUI</title>
+<link rel="stylesheet" href="style.css?v=34">
+</head>
+<body>
+<div class="app" id="app">
+  <div class="busybar" id="busyBar" hidden><span></span></div>
+
+  <header class="top">
+    <div class="brand">
+      <div class="logo" aria-hidden="true">
+        <svg viewBox="0 0 48 48" fill="none">
+          <rect x="7" y="13" width="31" height="22" rx="7" stroke="currentColor" stroke-width="2.6"/>
+          <rect x="40" y="20" width="4" height="8" rx="2" fill="currentColor"/>
+          <path d="M22.2 17.2l-5.4 8.1h5.1l-1.1 5.9 6.4-9.1h-5.3l.3-4.9z" fill="currentColor"/>
+        </svg>
+      </div>
+      <div class="brand-text">
+        <h1>一加13解容</h1>
+        <p>uv2800 <span class="sep">·</span> v<span id="verText">11</span> <span class="sep">·</span> versionCode <span id="verCodeText">34</span></p>
+      </div>
+    </div>
+    <div class="mode-pill offline" id="modePill"><span class="pulse"></span><span id="modeText">连接中</span></div>
+  </header>
+
+  <div class="notices" id="notices" aria-live="polite"></div>
+
+  <div class="error-box" id="errorBox" hidden role="alert">
+    <div class="error-head">
+      <span>操作失败</span>
+      <code id="errorCode">CODE</code>
+      <button class="link" id="errorClose" type="button">关闭</button>
+    </div>
+    <p id="errorText"></p>
+  </div>
+
+  <main>
+    <section class="hero card">
+      <div class="hero-main">
+        <div class="soc-line"><span class="soc" id="socValue">—</span><span class="pct" id="socPct"></span></div>
+        <div class="soc-label">电量计真实电量</div>
+        <div class="battery-bar"><span id="batteryFill" style="width:0%"></span></div>
+        <div class="soc-sub">
+          <span>系统显示 <b id="sysSoc">—</b></span>
+          <span id="voltText">—</span>
+          <span id="tempText">—</span>
+        </div>
+      </div>
+      <div class="hero-side">
+        <div class="stat">
+          <span class="k" id="heroVsLabel">关机电压 V_s</span>
+          <span class="v"><b id="heroVs">—</b><small>mV</small></span>
+        </div>
+        <div class="divider"></div>
+        <div class="stat">
+          <span class="k">ADSP 空电点</span>
+          <span class="v"><b id="heroAdsp">—</b><small>mV</small></span>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="section-head">
+        <div>
+          <h2>关机电压</h2>
+          <p>V_s 决定多低的电压关机，ADSP 由它自动派生</p>
+        </div>
+        <span class="tag" id="voltageTag">2800–3060</span>
+      </div>
+
+      <div class="voltage-row">
+        <div class="big"><span id="voltageValue">2800</span><small>mV</small></div>
+        <div class="derived">ADSP 派生 <b id="derivedAdsp">—</b> <span id="derivedUnit"></span></div>
+      </div>
+
+      <input type="range" id="voltageSlider" min="2800" max="3060" step="10" value="2800" aria-label="关机电压">
+
+      <div class="range-labels"><span>2800</span><span>3060</span></div>
+
+      <div class="quick-row">
+        <button class="quick" type="button" data-v="2800">2800</button>
+        <button class="quick" type="button" data-v="2900">2900</button>
+        <button class="quick" type="button" data-v="3000">3000</button>
+        <button class="quick" type="button" data-v="3060">3060</button>
+      </div>
+
+      <button class="btn primary" id="applyBtn" type="button" disabled>应用并重跑 service.sh</button>
+      <p class="hint" id="voltageHint">修改后立即生效；ADSP 写入失败会在下次开机重试。</p>
+    </section>
+
+    <section class="card danger-card">
+      <div class="section-head">
+        <div>
+          <h2 id="restoreTitle">恢复原厂</h2>
+          <p id="restoreDesc">写回电量计原值，退出解耦，恢复策略与官方电量显示</p>
+        </div>
+        <span class="tag danger" id="restoreOrigTag">原值 —</span>
+      </div>
+
+      <div class="restore-info">
+        <div><span>当前模式</span><b id="restoreMode">—</b></div>
+        <div><span>电池电压</span><b id="restoreVolt">—</b></div>
+        <div><span>真实电量</span><b id="restoreSoc">—</b></div>
+      </div>
+
+      <label class="check">
+        <input type="checkbox" id="riskCheck">
+        <span>我已知晓：低电量恢复可能让电量计钳位</span>
+      </label>
+
+      <button class="btn danger" id="restoreBtn" type="button" disabled>恢复原厂</button>
+      <p class="hint" id="restoreHint">执行前会再次确认；低电量（&lt;3300 mV 或 &lt;30%）需勾选风险确认。</p>
+    </section>
+
+    <section class="card">
+      <div class="section-head">
+        <div>
+          <h2>功能</h2>
+          <p>随模块模式自动生效</p>
+        </div>
+      </div>
+
+      <div class="toggle-row">
+        <div class="toggle-text">
+          <b>显示真实电量</b>
+          <span id="realSocHint">chip_soc → capacity，去掉官方平滑</span>
+        </div>
+        <button class="switch" id="realSocSwitch" type="button" role="switch" aria-checked="false" aria-label="显示真实电量" disabled><span></span></button>
+      </div>
+
+      <div class="toggle-row locked">
+        <div class="toggle-text">
+          <b>禁止 1% 强制超级省电 <span class="phase2">Phase 2 接入</span></b>
+          <span id="superSaverHint">Phase 2 接入：本阶段只读展示，开关不可切换。</span>
+        </div>
+        <button class="switch" id="superSaverSwitch" type="button" role="switch" aria-checked="false" aria-disabled="true" aria-label="禁止 1% 强制超级省电（Phase 2 接入）" disabled><span></span></button>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="section-head">
+        <div>
+          <h2>运行状态</h2>
+          <p>只读快照 · 每 9 秒自动刷新</p>
+        </div>
+        <button class="link" id="refreshBtn" type="button" disabled>刷新</button>
+      </div>
+
+      <div class="grid">
+        <div class="cell"><span>ADSP 实际</span><b id="adspActual">—</b></div>
+        <div class="cell"><span>vbat_uv</span><b id="vbatCell">—</b></div>
+        <div class="cell"><span>原值记录</span><b id="origCell">—</b></div>
+        <div class="cell"><span>ADSP 记录</span><b id="adspStateCell">—</b></div>
+        <div class="cell"><span>内核 profile</span><b id="profileCell">—</b></div>
+        <div class="cell"><span>启动路线</span><b id="routeCell">—</b></div>
+        <div class="cell"><span>真实电量绑定</span><b id="bindCell">—</b></div>
+        <div class="cell"><span>超级省电策略</span><b id="policyCell">—</b></div>
+        <div class="cell"><span>循环 / 深放</span><b id="cycleCell">—</b></div>
+        <div class="cell"><span>温度</span><b id="tempCell">—</b></div>
+      </div>
+    </section>
+
+    <details class="card details" id="advanced">
+      <summary><span>高级 / 日志</span><span class="chev">›</span></summary>
+      <div class="adv-grid">
+        <button class="btn ghost" id="refreshBtn2" type="button" disabled>刷新状态</button>
+        <button class="btn ghost" id="logBtn" type="button" disabled>查看日志</button>
+        <button class="btn ghost" type="button" disabled>捕获设备指针 · Phase 2</button>
+        <button class="btn ghost" type="button" disabled>手动写 ADSP · Phase 2</button>
+      </div>
+      <p class="hint adv-hint">Phase 1 仅接入 status / apply / restore / set-real-soc / log；读 ADSP、捕获设备、hook 旁路、手动写 ADSP 属于 Phase 2。</p>
+      <div class="log-box" id="logBox" hidden>
+        <div class="log-head"><span id="logTitle">uv2800.log · tail 50</span><button class="link" id="closeLog" type="button">收起</button></div>
+        <pre id="logText">—</pre>
+      </div>
+    </details>
+
+    <footer>
+      <p>长期低电压会加速电池老化，请按需调整。</p>
+      <p>卸载前请先在 WebUI 中恢复原厂。</p>
+      <p class="theme-note">主题跟随系统 · 亮色 / 暗色自动切换</p>
+    </footer>
+  </main>
+</div>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<script src="app.js?v=34"></script>
+</body>
+</html>

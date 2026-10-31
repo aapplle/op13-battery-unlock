@@ -19,7 +19,7 @@ for p in /proc/[0-9]*; do
   c=$(cat "$p/cmdline" 2>/dev/null | tr '\0' ' ')
   case "$c" in
     *uv2800/service.sh*) n=$((n+1)) ;;
-    *uv2800/action.sh*)  m=$((m+1)) ;;
+    *uv2800/restore.sh*|*uv2800/action.sh*)  m=$((m+1)) ;;
     *uv2800*)            z=$((z+1)) ;;
   esac
   st=$(awk '{print $3}' "$p/stat" 2>/dev/null)

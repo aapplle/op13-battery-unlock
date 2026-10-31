@@ -532,34 +532,34 @@ t_T1_5() { want T1.5 || return 0; case_begin T1.5 "解耦态无残留进程"
   A "retry 进程 = 0（v10 遗留，v11 恒真）" retry_proc eq 0
   case_end; }
 
-#CASE T2.1|「执行」→ skip 创建 + 进恢复模式
+#CASE T2.1|「恢复原厂」→ skip 创建 + 进恢复模式
 t_T2_1() { want T2.1 || return 0; case_begin T2.1 "执行 → skip 创建"
   ensure_decouple 2800; snap; local ORIG="${S[adsp_orig]:-?}"
   apply_dev factory >/dev/null 2>&1; sleep 4; snap
   A "skip == yes" skip eq yes
   case_end; }
 
-#CASE T2.2|「执行」→ ADSP 回写原厂值
+#CASE T2.2|「恢复原厂」→ ADSP 回写原厂值
 t_T2_2() { want T2.2 || return 0; case_begin T2.2 "执行 → ADSP = 原厂值"
   snap; local ORIG="${S[adsp_orig]:-?}"
   A "adsp_read = 原厂($ORIG)" adsp_read eq "$ORIG"
   A "adsp_state = 原厂($ORIG)" adsp_state eq "$ORIG"
   case_end; }
 
-#CASE T2.3|「执行」→ uv_target_mv = 原厂值
+#CASE T2.3|「恢复原厂」→ uv_target_mv = 原厂值
 t_T2_3() { want T2.3 || return 0; case_begin T2.3 "执行 → uv_target_mv = 原厂值"
   snap; local ORIG="${S[adsp_orig]:-?}"
   A "uv_target_mv = 原厂($ORIG)" param_target eq "$ORIG"
   case_end; }
 
-#CASE T2.4|「执行」→ vbat_uv 立即跟随（v10.17 核心修复，不插拔）
+#CASE T2.4|「恢复原厂」→ vbat_uv 立即跟随（v10.17 核心修复，不插拔）
 t_T2_4() { want T2.4 || return 0; case_begin T2.4 "执行 → vbat_uv 立即 = 原厂（不插拔）"
   snap; local ORIG="${S[adsp_orig]:-?}"
   A "vbat_uv = 原厂($ORIG)" vbat_uv eq "$ORIG"
   A "resume=0（已退出恢复模式）" param_resume eq 0
   case_end; }
 
-#CASE T2.5|「执行」→ bind 解绑
+#CASE T2.5|「恢复原厂」→ bind 解绑
 t_T2_5() { want T2.5 || return 0; case_begin T2.5 "执行 → bind 已解绑"
   snap; A "bind 层数 = 0" bind_layers eq 0
   case_end; }
@@ -723,7 +723,7 @@ t_T9_1() { want T9.1 || return 0; case_begin T9.1 "连续软重启 x3 -> 无残�
   done
   race_snap || { bad "race_snap 失败"; case_end; return; }
   AR "service.sh 残留进程 = 0" svc_procs eq 0
-  AR "action.sh 残留进程 = 0" action_procs eq 0
+  AR "restore.sh 残留进程 = 0" action_procs eq 0
   AR "无任何 uv2800 相关进程" uv_any_procs eq 0
   AR "内核模块唯一（未重复 insmod）" mods eq 1
   AR "解耦态保持：skip 不存在" skip eq no
@@ -751,13 +751,13 @@ t_T9_2() { want T9.2 || return 0; case_begin T9.2 "rm skip + 立即重启 -> 解
   AR "内核模块唯一" mods eq 1
   case_end; }
 
-#CASE T9.3|并发竞态（3×service.sh + action.sh）→ 收敛且状态自洽
+#CASE T9.3|并发竞态（3×service.sh + restore.sh）→ 收敛且状态自洽
 t_T9_3() { want T9.3 || return 0; case_begin T9.3 "并发竞态 -> 收敛且自洽"
   ensure_decouple 2800
   local out; out="$(sh_dev "$DEV_DIR/concurrent.sh")"
   race_snap || { bad "race_snap 失败"; case_end; return; }
   AR "并发结束后 service.sh 残留 = 0" svc_procs eq 0
-  AR "并发结束后 action.sh 残留 = 0" action_procs eq 0
+  AR "并发结束后 restore.sh 残留 = 0" action_procs eq 0
   AR "内核模块仍唯一" mods eq 1
   # 终态必须【自洽】：skip 存在 => 三项全等于原厂值且不绑定；skip 不存在 => 解耦三件套
   local org; org="${R[target]}"

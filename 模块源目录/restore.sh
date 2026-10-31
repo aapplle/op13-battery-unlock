@@ -38,7 +38,7 @@ adsp_known() {
     [ "$_k" = "$1" ] && return 0
     return 1
 }
-uv_log_sep "action.sh 恢复原值 开始"
+uv_log_sep "restore.sh 恢复原值 开始"
 
 PARAM=/sys/module/uv2800/parameters/adsp_write
 VBAT=/sys/class/oplus_chg/battery/vbat_uv
@@ -165,7 +165,7 @@ if [ "$SKIP_WRITE" = "0" ]; then
         # 自动捕获失败（该驱动的 deep_dischg 入口不可用），中止回写
         echo ""
         echo "  ✗✗ 无法捕获电量计设备指针（老版本驱动？），已【中止】回写 ✗✗"
-        echo "  请尝试重启手机后再点「执行」。"
+        echo "  请尝试重启手机后，在 WebUI 中重新点「恢复原厂」。"
         exit 1
     fi
 fi
@@ -229,7 +229,7 @@ dmesg 2>/dev/null | grep "uv2800:" | grep -v "Modules linked" | tail -4
 #   （uv_bypass=0），它就是 uv_target_mv 的【即时镜像】—— 改
 #   uv_target_mv=3000/3100/3250，vbat_uv 逐字跟随，零延迟。
 #   vbat_uv 卡住不跟随，唯一原因是 hook 被旁路（uv_bypass=1）；
-#   上方写 resume=1 即恢复，「执行」流程自身不旁路 hook
+#   上方写 resume=1 即恢复，「恢复原厂」流程自身不旁路 hook
 #   （adsp_write 走 uv_self_write 穿透）。
 # 本段保留为【兜底】：万一 hook 参数不可写（老内核）或读回异常，仍给出提示。
 CURV=$(cat "$VBAT" 2>/dev/null | tr -d "[:space:]")
