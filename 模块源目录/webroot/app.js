@@ -916,8 +916,8 @@
 
     var capture = $("captureBtn");
     if (capture) capture.addEventListener("click", captureDev);
-    var readAdsp = $("readAdspBtn");
-    if (readAdsp) readAdsp.addEventListener("click", readAdsp);
+    var readAdspBtn = $("readAdspBtn");
+    if (readAdspBtn) readAdspBtn.addEventListener("click", readAdsp);
     var writeAdspBtn = $("writeAdspBtn");
     if (writeAdspBtn) writeAdspBtn.addEventListener("click", writeAdsp);
     var adspConfirm = $("adspConfirm");
