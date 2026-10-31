@@ -274,6 +274,42 @@ cmd_read_adsp() {
     printf 'RESULT=ok\nCODE=ok\nADSP_READ=%s\nVALUE=%s\n' "$_uvrd_v" "$_uvrd_v"
 }
 
+cmd_write_adsp() {
+    _uv_lock
+    _uv_wait_scripts
+    _uv_require_loaded
+    _uv_require_enabled
+
+    _uvw_v=${1:-}
+    case "$_uvw_v" in
+        ''|*[!0-9]*) printf 'RESULT=fail\nCODE=invalid_value\nVALUE=NA\n'; exit 1 ;;
+    esac
+    if [ "$_uvw_v" -lt 2000 ] || [ "$_uvw_v" -gt 5000 ]; then
+        printf 'RESULT=fail\nCODE=invalid_range\nVALUE=%s\n' "$_uvw_v"
+        exit 1
+    fi
+    if [ -f "$BK/skip" ]; then
+        printf 'RESULT=fail\nCODE=skip_mode\nVALUE=%s\n' "$_uvw_v"
+        exit 1
+    fi
+    if [ -f "$BK/no_adsp_write" ]; then
+        printf 'RESULT=fail\nCODE=test_marker\nVALUE=%s\n' "$_uvw_v"
+        exit 1
+    fi
+
+    printf 'webui write-adsp %s\n' "$_uvw_v" > "$LAST"
+    printf '%s\n' "$_uvw_v" > "$P/adsp_write" 2>/dev/null
+    _uvw_rc=$?
+    sleep 1
+    _uvw_read=$(_uv_read_adsp)
+    if [ "$_uvw_read" = "$_uvw_v" ]; then
+        printf '%s\n' "$_uvw_v" > "$BK/adsp_state" 2>/dev/null
+        printf 'RESULT=ok\nCODE=ok\nADSP_READ=%s\nVALUE=%s\nRC=%s\n' "$_uvw_read" "$_uvw_v" "$_uvw_rc"
+    else
+        printf 'RESULT=warn\nCODE=readback_mismatch\nADSP_READ=%s\nVALUE=%s\nRC=%s\n' "$_uvw_read" "$_uvw_v" "$_uvw_rc"
+    fi
+}
+
 cmd_orig() {
     _uvog_v=$(uv_dt_orig 2>/dev/null | tail -1 | tr -d '[:space:]')
     case "$_uvog_v" in
@@ -699,6 +735,10 @@ case "${1:-}" in
         ;;
     read-adsp)
         cmd_read_adsp
+        ;;
+    write-adsp|write_adsp)
+        shift
+        cmd_write_adsp "$@"
         ;;
     orig)
         cmd_orig

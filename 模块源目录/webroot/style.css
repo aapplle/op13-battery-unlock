@@ -743,6 +743,51 @@ input[type="range"]:disabled::-webkit-slider-runnable-track {
   padding: 0 18px 12px;
 }
 .adv-hint { margin: 0 18px 16px; }
+.adv-write {
+  margin: 0 18px 14px;
+  padding: 12px;
+  border: 1px solid rgba(255,107,107,.18);
+  border-radius: 12px;
+  background: rgba(255,107,107,.035);
+}
+.adv-write-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--text);
+  font-size: 12px;
+}
+.adv-write-head b { font-weight: 650; }
+.adv-write-head span {
+  color: var(--red);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.adv-write .hint { margin: 7px 0 9px; }
+.adv-write-row { display: flex; gap: 8px; align-items: stretch; }
+.adv-input {
+  flex: 1;
+  min-width: 0;
+  height: 42px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg2);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  outline: none;
+}
+.adv-input:focus { border-color: rgba(255,107,107,.45); }
+.adv-write .btn {
+  width: auto;
+  min-width: 86px;
+  min-height: 42px;
+  padding: 0 13px;
+  font-size: 12px;
+}
+.adv-check { margin: 10px 0 0; }
 .log-box {
   margin: 0 18px 18px;
   border-radius: 12px;
