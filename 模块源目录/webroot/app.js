@@ -693,6 +693,7 @@
             return;
           }
           handleResult(kv, label);
+          if (state.logOpen) loadLog();
           if (hasKsu()) loadStatus();
           resolve(kv);
         });
@@ -814,6 +815,7 @@
     if (!state.connected || state.busy) return;
     hideError();
     loadStatus();
+    if (state.logOpen) loadLog();
     toast("已刷新状态");
   }
 
