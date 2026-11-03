@@ -380,6 +380,87 @@ static const struct kernel_param_ops uv_apply_ops = {
 module_param_cb(uv_apply, &uv_apply_ops, &uv_override_ok, 0644);
 MODULE_PARM_DESC(uv_apply, "write to re-apply four votable overrides; read 1 when all four ready");
 
+/* ================= A1 实验：调用 oplus_set_batt_true_fcc =================
+ * 仅用于验证 SET_TRUE_FCC(0x4b8) 是否能让 QBG 重锚 FCC/RM。
+ * 不在正常路径使用；写任意值触发一次，读回上次 rc。
+ * oplus_set_batt_true_fcc(x0) 只使用 x0（gauge ic dev），内部固定 value=1。
+ */
+static int uv_true_fcc_rc;
+static int uv_true_fcc_val;
+
+static noinline __attribute__((no_sanitize("kcfi")))
+int uv_call_true_fcc(void *dev, void *fn)
+{
+	int (*f)(void *) = fn;
+
+	return f(dev);
+}
+
+static int uv_true_fcc_set(const char *val, const struct kernel_param *kp)
+{
+	void *fn = uv_kprobe_sym("oplus_set_batt_true_fcc");
+	int rc;
+
+	if (!fn) {
+		pr_warn("uv2800: oplus_set_batt_true_fcc 符号不可用\n");
+		return -ENOENT;
+	}
+	if (!uv_dev) {
+		pr_warn("uv2800: uv_dev 未捕获，无法调用 true_fcc\n");
+		return -EAGAIN;
+	}
+	rc = uv_call_true_fcc(uv_dev, fn);
+	uv_true_fcc_rc = rc;
+	pr_info("uv2800: true_fcc(0x4b8) rc=%d dev=%px\n", rc, uv_dev);
+	return rc;
+}
+
+static int uv_true_fcc_get(char *buf, const struct kernel_param *kp)
+{
+	return uv_itoa(buf, uv_true_fcc_rc);
+}
+
+static const struct kernel_param_ops uv_true_fcc_ops = {
+	.set = uv_true_fcc_set,
+	.get = uv_true_fcc_get,
+};
+module_param_cb(uv_true_fcc, &uv_true_fcc_ops, &uv_true_fcc_val, 0644);
+MODULE_PARM_DESC(uv_true_fcc, "A1 test: write any value to call oplus_set_batt_true_fcc once");
+
+static int uv_true_fcc_vg_rc;
+static int uv_true_fcc_vg_val;
+
+static int uv_true_fcc_vg_set(const char *val, const struct kernel_param *kp)
+{
+	void *fn = uv_kprobe_sym("oplus_chg_vg_set_true_fcc");
+	int rc;
+
+	if (!fn) {
+		pr_warn("uv2800: oplus_chg_vg_set_true_fcc 符号不可用\n");
+		return -ENOENT;
+	}
+	if (!uv_dev) {
+		pr_warn("uv2800: uv_dev 未捕获，无法调用 true_fcc_vg\n");
+		return -EAGAIN;
+	}
+	rc = uv_call_true_fcc(uv_dev, fn);
+	uv_true_fcc_vg_rc = rc;
+	pr_info("uv2800: true_fcc_vg(0x4b8 wrapper) rc=%d dev=%px\n", rc, uv_dev);
+	return rc;
+}
+
+static int uv_true_fcc_vg_get(char *buf, const struct kernel_param *kp)
+{
+	return uv_itoa(buf, uv_true_fcc_vg_rc);
+}
+
+static const struct kernel_param_ops uv_true_fcc_vg_ops = {
+	.set = uv_true_fcc_vg_set,
+	.get = uv_true_fcc_vg_get,
+};
+module_param_cb(uv_true_fcc_vg, &uv_true_fcc_vg_ops, &uv_true_fcc_vg_val, 0644);
+MODULE_PARM_DESC(uv_true_fcc_vg, "A1 test: write any value to call oplus_chg_vg_set_true_fcc once");
+
 static void uv_override_clear(void)
 {
 	int i;
