@@ -145,8 +145,10 @@ cmd_status() {
 
     if [ "$_uvs_mode" = decoupled ] && [ "$_uvs_te" != NA ]; then
         _uvs_derived=$(_uv_derived "$_uvs_te")
+        _uvs_term=$_uvs_derived
     else
         _uvs_derived=NA
+        _uvs_term=NA
     fi
 
     if [ "$_uvs_mode" = factory ] && [ "$_uvs_orig" != NA ]; then
@@ -217,6 +219,8 @@ cmd_status() {
     printf 'PARAM_TARGET=%s\n' "$_uvs_pt"
     printf 'PARAM_ADSP=%s\n' "$_uvs_pa"
     printf 'TARGET_EFFECTIVE=%s\n' "$_uvs_te"
+    printf 'SHUTDOWN_TARGET=%s\n' "$_uvs_te"
+    printf 'TERM_TARGET=%s\n' "$_uvs_term"
     printf 'ADSP_DERIVED=%s\n' "$_uvs_derived"
     printf 'ADSP_READ=%s\n' "$_uvs_adsp"
     printf 'EXPECTED_ADSP=%s\n' "$_uvs_exp"

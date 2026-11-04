@@ -138,6 +138,12 @@ _uv_profile() {
     if [ -z "$_uvpr_v" ]; then
         _uvpr_v=$(grep 'profile=' "$LOG" 2>/dev/null | tail -1 | sed -n 's/.*profile=\[\([^]]*\)\].*/\1/p')
     fi
+    if [ -z "$_uvpr_v" ]; then
+        case "$(getprop ro.build.display.id 2>/dev/null)" in
+            *15.*) _uvpr_v=cos15 ;;
+            *16.*|*17.*) _uvpr_v=cos16_17 ;;
+        esac
+    fi
     case "$_uvpr_v" in
         *"ColorOS 16"*|*"ColorOS 17"*|*cos16*|*cos17*) printf 'cos16_17' ;;
         *"ColorOS 15"*|*cos15*) printf 'cos15' ;;
@@ -172,12 +178,22 @@ _uv_loaded() {
     return 1
 }
 
-_uv_derived() {
-    # 目标态：ADSP term 与关机电压同值，不再派生偏移。
-    case "$1" in
-        ''|*[!0-9]*) printf 'NA'; return ;;
+_uv_term_target() {
+    # QBG 学习 term 与 AP shutdown 分离；优先读内核参数，其次落盘默认值。
+    _uvtt_v=$(cat "$P/uv_term_mv" 2>/dev/null | tr -d '[:space:]')
+    case "$_uvtt_v" in
+        ''|*[!0-9]*) _uvtt_v=$(cat "$BK/term_mv" 2>/dev/null | tr -d '[:space:]') ;;
     esac
-    printf '%s' "$1"
+    case "$_uvtt_v" in
+        ''|*[!0-9]*) _uvtt_v=2540 ;;
+    esac
+    printf '%s' "$_uvtt_v"
+}
+
+_uv_derived() {
+    # 兼容旧调用：ADSP 期望值现在取学习 term，而不是 V_s。
+    _uv_derived_term=$(_uv_term_target)
+    printf '%s' "$_uv_derived_term"
 }
 
 _uv_parse_mv() {

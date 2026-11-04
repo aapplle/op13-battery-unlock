@@ -3,20 +3,20 @@
 // ============ 功能总览 ============
 //  ① uv_get ：挂钩 oplus_comm_update_vbat_uv_thr，把驱动算出的关机电压
 //             vbat_uv 强制为运行时参数 uv_target_mv（默认 2800，即用户可调的
-//             关机电压 V_s）。
+//             AP 关机电压 V_s）。
 //  ② uv_show：挂钩 vbat_uv_show（sysfs 读出侧），同样返回 uv_target_mv ——
 //             驱动内部值与状态栏读到的值必须一致。
 //  ③ uv_term_get：挂钩 getter 内部 get_off，把驱动从 ADSP 读到的终止电压
-//             （空电点）强制为 uv_target_mv（V_s）。
+//             （空电点）强制为 uv_term_mv（QBG 学习 term）。
 //  ④ uv_term_set：挂钩 setter 内部 set_off，驱动纠偏写回时把写入值统一为
-//             uv_target_mv（V_s）。
+//             uv_term_mv（QBG 学习 term）。
 //  uv_term_entry：在 getter 入口（offset 0）捕获 dev 指针（uv_dev），
 //             供 adsp_read / adsp_write 复用同一个 dev。
 //  uv_ddrc_entry：在 deep_dischg 入口补捕获 uv_dev，不依赖驱动 vote（插拔）。
 //
 //  用户态入口（module param）：
 //    uv_target_mv  关机电压强制值（2000~5000 钳制，默认 2800）
-//    uv_adsp_mv    兼容旧脚本的别名，等于 uv_target_mv（V_s）
+//    uv_term_mv    QBG 学习 term；uv_adsp_mv 为兼容别名
 //    adsp_read     写任意值 -> 直读 ADSP 里保存的 deep_term_volt 真值
 //    adsp_write    写电压值 -> 主动调用 setter 回写 ADSP
 //    resume        写 1 退出恢复模式（hook 重新生效），写 0 进入
@@ -39,8 +39,8 @@
 //   · 实测：term=2800 时 fcc 4366→4956（+13.5%）；term=2600 时 fcc→~5000；
 //     默认 term=2540 时驱动上报 fcc=5020。
 //   · 原生库仑计量与负载无关 → 高倍率放电天然正确（显示层方案做不到）。
-//   · 关机电压、ADSP term、四个 votable 全部锁定为 uv_target_mv（V_s）；
-//     FCC/QMAX/SOC/mAh 按 V_s 模型计算，满充/放空后收敛。
+//   · 关机 votable 锁定为 V_s；QBG 学习 term 由 uv_term_mv 独立控制；
+//     C16/17 四票分离，C15 两票 + 原厂 2800 地板。
 //
 // ============ 兼容性 ============
 //  挂钩偏移由 profile 表按驱动指令字自适应选择（ColorOS 15 / 16 / 17），
@@ -83,7 +83,7 @@ static int uv_adsp_mv = 2540;              /* legacy alias of term */
 static int uv_shutdown_mv = UV_TARGET_MV;  /* explicit alias of shutdown */
 
 /* 目标态：actual deep_term、GAUGE_TERM/TARGET_TERM、GAUGE_SHUTDOWN/TARGET_SHUTDOWN
- * 全部锁到 uv_target_mv（V_s）。FCC/QMAX 在下一次满充/放空后按 V_s 重算。 */
+ * term 锁到 uv_term_mv，shutdown 锁到 uv_target_mv；两者分离。 */
 static void uv_override_apply(void);
 
 /* uv_target_mv 范围钳制
@@ -318,8 +318,9 @@ static int uv_detect_profile(void)
  *   GAUGE_SHUTDOWN_VOLTAGE / TARGET_SHUTDOWN_VOLTAGE
  * 普通 vote() 2800 会输给原厂 3200/3250；只有 vote_override 能压过。
  * 四个都强制为 uv_target_mv 后：
- *   adjusted = V_s - V_s + actual_term(V_s) = V_s
- * gauge 的 FCC/QMAX/SOC/mAh 随之按 V_s 模型，满充/放空后收敛。
+ *   term 票 = T，shutdown 票 = V_s，actual term = T
+ *   adjusted = V_s - T + T = V_s
+ * gauge 的 FCC/QMAX/SOC/mAh 仍按 QBG 学习窗口，满充/放空后收敛。
  */
 static void *uv_find_votable_fn;
 static void *uv_vote_override_fn;
@@ -762,10 +763,11 @@ static int uv_show(struct kprobe *p, struct pt_regs *regs)
 }
 
 /* getter 内部挂钩点（get_off 偏移 = "str w<get_reg>,[...]" 指令所在）。
- * 驱动读到的 ADSP term 在即将存回结构体前被强制为 uv_target_mv（V_s）。
+ * 驱动读到的 ADSP term 在即将存回结构体前被强制为 uv_term_mv（T）。
  * 这个读值会进入驱动关机票计算：
  *     shutdown = (TARGET_SHUTDOWN - TARGET_TERM) + getter 读回值
- * 目标态四个 votable 也都是 V_s，因此 adjusted_shutdown = V_s。
+ * C16/17 四票分离：target_term=T、shutdown=V_s，因此 adjusted=V_s；
+ * C15 两票：target_term 是 DT 常量 3250，2800 由原厂 SPEC 地板兜底。
  * 必须在 get_off 处改：该偏移之前的指令会刷新目标寄存器，入口改值会被覆盖。*/
 static int uv_term_get(struct kprobe *p, struct pt_regs *regs);
 static struct kprobe kp_term_get = {
@@ -820,7 +822,7 @@ static int uv_ddrc_entry(struct kprobe *p, struct pt_regs *regs)
 }
 
 /* setter 内部挂钩点（set_off 偏移）：驱动发起纠偏写回时，把写入值统一成
- * uv_target_mv（V_s）—— 没有它，驱动会把 ADSP 打回它自己算出的 3250。
+ * uv_term_mv（T）—— 没有它，驱动会把 ADSP 打回它自己算出的 3250。
  * 平时驱动不做"vote 目标 != 当前 ADSP"的写入，④ 因此不活跃；一旦驱动纠偏
  * 就会执行（独立审计 §3c.3）。*/
 static int uv_term_set(struct kprobe *p, struct pt_regs *regs);
@@ -892,7 +894,7 @@ static int __init uv2800_init(void)
 	if (!register_kprobe(&kp_ddrc)) n++;
 	else pr_warn("uv2800: kp_ddrc 注册失败（deep_dischg 入口），回退到插拔捕获\n");
 
-	/* 目标态：四个 votable + actual term 全部锁到 V_s。
+	/* 目标态：term 票锁 T，shutdown 票锁 V_s，actual term=T。
 	 * votable 尚未创建时，由 service.sh 写 uv_apply 重放。*/
 	uv_override_apply();
 	if (!uv_override_ok)

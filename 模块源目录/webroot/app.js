@@ -171,8 +171,10 @@
   }
 
   function derived(v) {
-    // 目标态：ADSP term 与关机电压同值，不再派生 2540。
-    return v;
+    // ADSP 期望值取 QBG 学习 term，与关机电压 V_s 分离。
+    var kv = state.status || {};
+    var t = pickNum(kv.TERM_TARGET, kv.PARAM_TERM, kv.ADSP_DERIVED);
+    return t === null ? 2540 : t;
   }
 
   function clamp(n, lo, hi) {

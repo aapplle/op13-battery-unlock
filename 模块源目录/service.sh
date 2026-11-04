@@ -2,7 +2,7 @@
 # ============================================================
 # uv2800 - service.sh（服务阶段；标准启动与 late-load 越狱模式都会执行）
 #   1) 兜底 insmod（late-load 下由 late-load.sh 加载，这里是双保险）
-#   2) ★ 原生 SOC 校准：把 ADSP term、四个 votable 全部锁定为 V_s（默认 2800）
+#   2) ★ 原生 SOC 校准：term 票锁 QBG 学习 term，shutdown 票锁 V_s（默认 2800）
 #   3) ★ 显示真实电量：bind-mount chip_soc -> capacity（去掉官方平滑滞后）
 #   4) 禁止低电量强制进入超级省电（OPPO 设备策略，COS15/16/17 通用）
 #
@@ -155,10 +155,10 @@ if [ "$_uvd" -le 2000 ] 2>/dev/null; then
     klog "触发后 adsp_read=$(cat "$P/adsp_read" 2>/dev/null)"
 fi
 
-# --- * 关机电压自定义 + ADSP 同值锁定 -------------------------------
+# --- * 关机电压自定义 + QBG term 分离 -------------------------------
 # 用户可调：关机电压 V_s（2800~3060，默认 2800），落盘 $BK/target_mv。
-# 目标态：actual deep_term、GAUGE_TERM/TARGET_TERM、GAUGE_SHUTDOWN/TARGET_SHUTDOWN
-# 全部等于 V_s；FCC/QMAX/SOC/mAh 在下一次满充/放空后按 V_s 重算。
+# term 默认 2540，可用 $BK/term_mv 覆盖；GAUGE_TERM/TARGET_TERM=T，
+# GAUGE_SHUTDOWN/TARGET_SHUTDOWN=V_s；C16/17 四票分离，C15 两票 + 2800 地板。
 # 不再派生 2540，也不再做温度/老化补偿。
 if [ ! -f "$BK/target_mv" ]; then
     echo "$TARGET_MV_DEFAULT" > "$BK/target_mv"
