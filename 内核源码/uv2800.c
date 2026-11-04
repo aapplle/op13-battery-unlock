@@ -77,8 +77,10 @@
  *   vbat_uv 不跟随的唯一原因是 hook 被旁路，不是"驱动缓存未刷新"。
  *   （service.sh / action.sh 有同款说明。）
  * ------------------------------------------------------------------ */
-static int uv_target_mv = UV_TARGET_MV;
-static int uv_adsp_mv;
+static int uv_target_mv = UV_TARGET_MV;   /* AP shutdown V_s */
+static int uv_term_mv = 2540;              /* QBG learning term T */
+static int uv_adsp_mv = 2540;              /* legacy alias of term */
+static int uv_shutdown_mv = UV_TARGET_MV;  /* explicit alias of shutdown */
 
 /* 目标态：actual deep_term、GAUGE_TERM/TARGET_TERM、GAUGE_SHUTDOWN/TARGET_SHUTDOWN
  * 全部锁到 uv_target_mv（V_s）。FCC/QMAX 在下一次满充/放空后按 V_s 重算。 */
@@ -98,7 +100,7 @@ static int uv_target_mv_set(const char *val, const struct kernel_param *kp)
 		return -EINVAL;
 	}
 	uv_target_mv = v;
-	uv_adsp_mv = v; /* 目标态：term/shutdown 与 V_s 同步，不再独立派生 */
+	uv_shutdown_mv = v;
 	uv_override_apply();
 	return 0;
 }
@@ -118,12 +120,9 @@ module_param_cb(uv_target_mv, &uv_target_mv_ops, &uv_target_mv, 0644);
 MODULE_PARM_DESC(uv_target_mv, "forced vbat_uv value in mV (default 2800, range 2000~5000)");
 
 /* ------------------------------------------------------------------
- * uv_adsp_mv：兼容旧脚本/旧 WebUI 的别名。
- * 目标态下 term、shutdown、votable 全部等于 uv_target_mv，因此本参数只做
- * 双向同步；写它等价于写 uv_target_mv。
+ * uv_adsp_mv / uv_term_mv：QBG 学习 term（T），与 AP shutdown（V_s）分离。
+ * uv_adsp_mv 保留旧脚本兼容；uv_term_mv 是显式新名。
  * ------------------------------------------------------------------ */
-static int uv_adsp_mv = UV_TARGET_MV;	/* 兼容旧脚本的别名；目标态等于 V_s */
-
 static int uv_adsp_mv_set(const char *val, const struct kernel_param *kp)
 {
 	int v;
@@ -131,21 +130,58 @@ static int uv_adsp_mv_set(const char *val, const struct kernel_param *kp)
 	if (kstrtoint(val, 10, &v))
 		return -EINVAL;
 	if (v < 2000 || v > 5000) {
-		pr_warn("uv2800: uv_adsp_mv %d mV 超出范围 2000~5000，拒绝\n", v);
+		pr_warn("uv2800: term %d mV 超出范围 2000~5000，拒绝\n", v);
 		return -EINVAL;
 	}
 	uv_adsp_mv = v;
+	uv_term_mv = v;
+	uv_override_apply();
+	return 0;
+}
+
+static int uv_adsp_mv_get(char *buf, const struct kernel_param *kp)
+{
+	return uv_itoa(buf, uv_term_mv);
+}
+
+static const struct kernel_param_ops uv_adsp_mv_ops = {
+	.set = uv_adsp_mv_set,
+	.get = uv_adsp_mv_get,
+};
+module_param_cb(uv_adsp_mv, &uv_adsp_mv_ops, &uv_adsp_mv, 0644);
+MODULE_PARM_DESC(uv_adsp_mv, "legacy alias of uv_term_mv (QBG learning term)");
+
+module_param_cb(uv_term_mv, &uv_adsp_mv_ops, &uv_term_mv, 0644);
+MODULE_PARM_DESC(uv_term_mv, "QBG learning term in mV (default 2540, range 2000~5000)");
+
+static int uv_shutdown_mv_set(const char *val, const struct kernel_param *kp)
+{
+	int v;
+
+	if (kstrtoint(val, 10, &v))
+		return -EINVAL;
+	if (v < 2000 || v > 5000) {
+		pr_warn("uv2800: shutdown %d mV 超出范围 2000~5000，拒绝\n", v);
+		return -EINVAL;
+	}
+	uv_shutdown_mv = v;
 	uv_target_mv = v;
 	uv_override_apply();
 	return 0;
 }
 
-static const struct kernel_param_ops uv_adsp_mv_ops = {
-	.set = uv_adsp_mv_set,
-	.get = uv_target_mv_get,
+static int uv_shutdown_mv_get(char *buf, const struct kernel_param *kp)
+{
+	return uv_itoa(buf, uv_target_mv);
+}
+
+static const struct kernel_param_ops uv_shutdown_mv_ops = {
+	.set = uv_shutdown_mv_set,
+	.get = uv_shutdown_mv_get,
 };
-module_param_cb(uv_adsp_mv, &uv_adsp_mv_ops, &uv_adsp_mv, 0644);
-MODULE_PARM_DESC(uv_adsp_mv, "legacy alias of uv_target_mv; kept equal to V_s");
+module_param_cb(uv_shutdown_mv, &uv_shutdown_mv_ops, &uv_shutdown_mv, 0644);
+MODULE_PARM_DESC(uv_shutdown_mv, "AP shutdown voltage V_s in mV (default 2800)");
+
 
 /* ================= profile（跨版本） ================= */
 struct uv_profile {
@@ -191,6 +227,7 @@ static const struct uv_sig uv_sigs[] = {
 static struct kprobe kp_verify;
 
 static int cur_get_reg, cur_set_reg, cur_set_ptr;
+static int uv_override_expected = 4;
 static int cur_profile_idx = -1;
 static const char *cur_profile = "none";
 
@@ -265,6 +302,8 @@ static int uv_detect_profile(void)
 		cur_set_ptr = p->set_ptr;
 		cur_profile_idx = i;
 		cur_profile = p->name;
+		/* profile 1 = ColorOS 15，只有 GAUGE_TERM/GAUGE_SHUTDOWN 两票；profile 0 = C16/17 四票 */
+		uv_override_expected = (i == 1) ? 2 : 4;
 		pr_info("uv2800: 匹配 profile [%s]  getter+%#x setter+%#x ABI=%s\n",
 			p->name, p->get_off, p->set_off,
 			p->set_ptr ? "(dev,int*)" : "(dev,int)");
@@ -286,6 +325,7 @@ static void *uv_find_votable_fn;
 static void *uv_vote_override_fn;
 static int uv_override_ok;
 static int uv_override_last_mv;
+static int uv_override_last_term;
 
 static const char * const uv_override_names[] = {
 	"GAUGE_TERM_VOLTAGE",
@@ -340,25 +380,29 @@ static void uv_override_apply(void)
 	for (i = 0; i < ARRAY_SIZE(uv_override_names); i++) {
 		void *v = uv_call_find_votable(uv_override_names[i],
 					       uv_find_votable_fn);
+		int mv = (i < 2) ? uv_term_mv : uv_target_mv;
 		int rc;
 
 		if (!v)
 			continue;
-		rc = uv_call_vote_override(v, "UV2800", true, uv_target_mv,
+		rc = uv_call_vote_override(v, "UV2800", true, mv,
 					   false, uv_vote_override_fn);
 		if (rc) {
 			pr_warn("uv2800: vote_override %s=%d 失败 rc=%d\n",
-				uv_override_names[i], uv_target_mv, rc);
+				uv_override_names[i], mv, rc);
 			continue;
 		}
 		found++;
 	}
 
-	uv_override_ok = (found == ARRAY_SIZE(uv_override_names));
-	if (found && (uv_override_last_mv != uv_target_mv || !uv_override_ok)) {
-		pr_info("uv2800: votable override %d/%d -> %d mV\n",
-			found, (int)ARRAY_SIZE(uv_override_names), uv_target_mv);
+	uv_override_ok = (found >= uv_override_expected);
+	if (found && (uv_override_last_mv != uv_target_mv ||
+		      uv_override_last_term != uv_term_mv || !uv_override_ok)) {
+		pr_info("uv2800: votable override %d/%d (expected %d) term=%d shutdown=%d mV\n",
+			found, (int)ARRAY_SIZE(uv_override_names),
+			uv_override_expected, uv_term_mv, uv_target_mv);
 		uv_override_last_mv = uv_target_mv;
+		uv_override_last_term = uv_term_mv;
 	}
 }
 
@@ -731,7 +775,7 @@ static struct kprobe kp_term_get = {
 static int uv_term_get(struct kprobe *p, struct pt_regs *regs)
 {
 	if (!uv_bypass && !uv_self_read)
-		regs->regs[cur_get_reg] = uv_target_mv;	/* 目标态：term = V_s */
+		regs->regs[cur_get_reg] = uv_term_mv;	/* 学习 term 独立于 shutdown */
 	return 0;
 }
 
@@ -787,7 +831,7 @@ static struct kprobe kp_term_set = {
 static int uv_term_set(struct kprobe *p, struct pt_regs *regs)
 {
 	if (!uv_bypass && !uv_self_write)
-		regs->regs[cur_set_reg] = uv_target_mv;	/* 目标态：term = V_s */
+		regs->regs[cur_set_reg] = uv_term_mv;	/* 学习 term 独立于 shutdown */
 	return 0;
 }
 

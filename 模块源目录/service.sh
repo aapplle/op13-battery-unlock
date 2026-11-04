@@ -174,9 +174,18 @@ if [ "$V_S" -lt 2800 ] 2>/dev/null || [ "$V_S" -gt 3060 ] 2>/dev/null; then
     V_S=$TARGET_MV_DEFAULT
     echo "$V_S" > "$BK/target_mv"
 fi
-# 目标态：ADSP term 与关机电压同值，不再派生偏移
-ADSP_TARGET=$V_S
-klog "关机电压 V_s=${V_S} mV，ADSP 目标=${ADSP_TARGET} mV（term/shutdown 同值）"
+# 目标态：term 与 shutdown 分离。
+# C16/17 四票干净解耦；C15 两票下 V_s=2800 由原厂 SPEC_VOTER 2800 兜底。
+TERM_TARGET=2540
+if [ -f "$BK/term_mv" ]; then
+    _t=$(cat "$BK/term_mv" 2>/dev/null | tr -d "[:space:]")
+    case "$_t" in
+        ''|*[!0-9]*) ;;
+        *) [ "$_t" -ge 2500 ] 2>/dev/null && [ "$_t" -le $((V_S - 100)) ] 2>/dev/null && TERM_TARGET=$_t ;;
+    esac
+fi
+ADSP_TARGET=$TERM_TARGET
+klog "关机电压 V_s=${V_S} mV，QBG 学习 term=${ADSP_TARGET} mV（term/shutdown 分离）"
 
 # --- 2) ★ 原生 SOC 校准：解耦写入电量计终止电压（adsp_write 主动写）---------
 # 【为什么必须主动写】解耦写入【唯一可靠路径】是模块主动 adsp_write：
@@ -221,8 +230,11 @@ elif [ -f "$BK/skip" ]; then
     if [ -n "$_orig" ] && [ "$_orig" -ge 3000 ] 2>/dev/null && [ "$_orig" -le 5000 ] 2>/dev/null; then
         # ① hook 强制值设为原厂（保证 vbat_uv 恒为原厂）。
         #    退出「恢复模式」已提到脚本开头统一处理（见 1.5 节），这里只设值。
-        if [ "$(cat "$P/uv_target_mv" 2>/dev/null)" != "$_orig" ]; then
+        if [ "$(cat "$P/uv_shutdown_mv" 2>/dev/null)" != "$_orig" ]; then
+            echo "$_orig" > "$P/uv_shutdown_mv" 2>/dev/null
             echo "$_orig" > "$P/uv_target_mv" 2>/dev/null
+            echo "$_orig" > "$P/uv_term_mv" 2>/dev/null
+            echo "$_orig" > "$P/uv_adsp_mv" 2>/dev/null
             sleep 1
             klog "已把内核 hook 强制值设为原厂 ${_orig} mV，vbat_uv=$(cat /sys/class/oplus_chg/battery/vbat_uv 2>/dev/null)"
         fi
@@ -261,11 +273,13 @@ elif [ -w "$P/adsp_read" ]; then
     # --- ★ 把 hook 强制值设为用户自定义的 V_s -------------------------
     # 若上一轮处于 skip（已恢复原厂）模式，uv_target_mv 被设成了原厂值；
     # 这里（解耦模式）必须复位回 V_s，否则 hook 会继续强制原厂值，解耦失效。
-    if [ "$(cat "$P/uv_target_mv" 2>/dev/null)" != "$V_S" ]; then
+    if [ "$(cat "$P/uv_shutdown_mv" 2>/dev/null)" != "$V_S" ]; then
+        echo "$V_S" > "$P/uv_shutdown_mv" 2>/dev/null
         echo "$V_S" > "$P/uv_target_mv" 2>/dev/null
-        klog "已把内核 hook 强制值设为 ${V_S} mV（解耦模式）"
+        klog "已把 shutdown hook 强制值设为 ${V_S} mV（解耦模式）"
     fi
-    # 无条件同步 uv_adsp_mv（③④ hook 的目标），防止残留默认值/上轮值
+    # term 与 shutdown 分离：uv_term_mv 是 QBG 学习目标，uv_adsp_mv 兼容旧名
+    echo "$ADSP_TARGET" > "$P/uv_term_mv" 2>/dev/null
     echo "$ADSP_TARGET" > "$P/uv_adsp_mv" 2>/dev/null
 
     # 退出「恢复模式」已提到脚本开头统一处理（见 1.5 节）。
@@ -304,7 +318,8 @@ elif [ -w "$P/adsp_read" ]; then
         # ① uv_dev 就绪：主动写入（写后读回校验，一致才记录 adsp_state）
         if [ "$cur" != "$ADSP_TARGET" ]; then
             backup_orig "$cur"
-            # 先同步 uv_adsp_mv（③④ hook 的目标），再写 ADSP
+            # 先同步 term（③④ hook 的目标），再写 ADSP
+            echo "$ADSP_TARGET" > "$P/uv_term_mv" 2>/dev/null
             echo "$ADSP_TARGET" > "$P/uv_adsp_mv" 2>/dev/null
             echo "$ADSP_TARGET" > "$P/adsp_write"
             _rb=$(echo 1 > "$P/adsp_read" 2>/dev/null; cat "$P/adsp_read" 2>/dev/null)
