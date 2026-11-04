@@ -170,8 +170,8 @@
     return null;
   }
 
-  function derived(v) {
-    // ADSP 期望值取 QBG 学习 term，与关机电压 V_s 分离。
+  function derived() {
+    // ADSP 学习 term 是独立固定值，绝不由滑块 V_s 动态计算。
     var kv = state.status || {};
     var t = pickNum(kv.TERM_TARGET, kv.PARAM_TERM, kv.ADSP_DERIVED);
     return t === null ? 2540 : t;
@@ -395,7 +395,7 @@
     var factory = state.mode === "factory";
 
     setText("voltageValue", (dec || factory) ? String(state.vs) : "—");
-    setText("derivedAdsp", dec ? String(derived(state.vs)) : "—");
+    setText("derivedAdsp", dec ? String(derived()) : "—");
     setText("derivedUnit", dec ? "mV" : "");
 
     each(".quick", function (el) {
