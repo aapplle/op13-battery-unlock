@@ -86,6 +86,20 @@ static int uv_shutdown_mv = UV_TARGET_MV;  /* explicit alias of shutdown */
  * term 锁到 uv_term_mv，shutdown 锁到 uv_target_mv；两者分离。 */
 static void uv_override_apply(void);
 
+/* v11 公式：ADSP term = 2*V_s - 3060（FLOOR=3060）。
+ * 2800 -> 2540；2900 -> 2740；3000 -> 2940；3060 -> 3060。
+ * 这是 V_s 的派生值，不再作为独立静态值。 */
+static int uv_derive_term(int vs)
+{
+	int t = 2 * vs - 3060;
+
+	if (t < 2000)
+		t = 2000;
+	if (t > 5000)
+		t = 5000;
+	return t;
+}
+
 /* uv_target_mv 范围钳制
  * 任意整数都会直接成为 vbat_uv，必须限制在合理范围内
  * （与 adsp_write 的 2000~5000 钳制一致）。*/
@@ -101,6 +115,8 @@ static int uv_target_mv_set(const char *val, const struct kernel_param *kp)
 	}
 	uv_target_mv = v;
 	uv_shutdown_mv = v;
+	uv_term_mv = uv_derive_term(v);
+	uv_adsp_mv = uv_term_mv;
 	uv_override_apply();
 	return 0;
 }
@@ -120,8 +136,8 @@ module_param_cb(uv_target_mv, &uv_target_mv_ops, &uv_target_mv, 0644);
 MODULE_PARM_DESC(uv_target_mv, "forced vbat_uv value in mV (default 2800, range 2000~5000)");
 
 /* ------------------------------------------------------------------
- * uv_adsp_mv / uv_term_mv：QBG 学习 term（T），与 AP shutdown（V_s）分离。
- * uv_adsp_mv 保留旧脚本兼容；uv_term_mv 是显式新名。
+ * uv_adsp_mv / uv_term_mv：兼容旧脚本的只读/派生 term。
+ * 值由 uv_target_mv（V_s）通过 v11 公式动态计算，写入不再能独立覆盖。
  * ------------------------------------------------------------------ */
 static int uv_adsp_mv_set(const char *val, const struct kernel_param *kp)
 {
@@ -129,12 +145,12 @@ static int uv_adsp_mv_set(const char *val, const struct kernel_param *kp)
 
 	if (kstrtoint(val, 10, &v))
 		return -EINVAL;
-	if (v < 2000 || v > 5000) {
-		pr_warn("uv2800: term %d mV 超出范围 2000~5000，拒绝\n", v);
-		return -EINVAL;
-	}
-	uv_adsp_mv = v;
-	uv_term_mv = v;
+	/* 忽略外部值：term 必须跟随 V_s，避免 WebUI/旧脚本写成静态值。 */
+	uv_term_mv = uv_derive_term(uv_target_mv);
+	uv_adsp_mv = uv_term_mv;
+	if (v != uv_term_mv)
+		pr_info("uv2800: term 由 V_s=%d 派生为 %d mV（忽略写入 %d）\n",
+			uv_target_mv, uv_term_mv, v);
 	uv_override_apply();
 	return 0;
 }
@@ -166,6 +182,8 @@ static int uv_shutdown_mv_set(const char *val, const struct kernel_param *kp)
 	}
 	uv_shutdown_mv = v;
 	uv_target_mv = v;
+	uv_term_mv = uv_derive_term(v);
+	uv_adsp_mv = uv_term_mv;
 	uv_override_apply();
 	return 0;
 }

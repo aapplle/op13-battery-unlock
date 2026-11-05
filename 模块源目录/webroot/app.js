@@ -170,11 +170,14 @@
     return null;
   }
 
-  function derived() {
-    // ADSP 学习 term 是独立固定值，绝不由滑块 V_s 动态计算。
-    var kv = state.status || {};
-    var t = pickNum(kv.TERM_TARGET, kv.PARAM_TERM, kv.ADSP_DERIVED);
-    return t === null ? 2540 : t;
+  function derived(v) {
+    // v11 公式：ADSP 学习 term = 2*V_s - 3060，随滑块动态计算。
+    var n = Number(v);
+    if (!isFinite(n)) return 2540;
+    var t = 2 * n - 3060;
+    if (t < 2000) t = 2000;
+    if (t > 5000) t = 5000;
+    return t;
   }
 
   function clamp(n, lo, hi) {
@@ -395,7 +398,7 @@
     var factory = state.mode === "factory";
 
     setText("voltageValue", (dec || factory) ? String(state.vs) : "—");
-    setText("derivedAdsp", dec ? String(derived()) : "—");
+    setText("derivedAdsp", dec ? String(derived(state.vs)) : "—");
     setText("derivedUnit", dec ? "mV" : "");
 
     each(".quick", function (el) {

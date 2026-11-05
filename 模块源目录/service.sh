@@ -174,18 +174,13 @@ if [ "$V_S" -lt 2800 ] 2>/dev/null || [ "$V_S" -gt 3060 ] 2>/dev/null; then
     V_S=$TARGET_MV_DEFAULT
     echo "$V_S" > "$BK/target_mv"
 fi
-# 目标态：term 与 shutdown 分离。
-# C16/17 四票干净解耦；C15 两票下 V_s=2800 由原厂 SPEC_VOTER 2800 兜底。
-TERM_TARGET=2540
-if [ -f "$BK/term_mv" ]; then
-    _t=$(cat "$BK/term_mv" 2>/dev/null | tr -d "[:space:]")
-    case "$_t" in
-        ''|*[!0-9]*) ;;
-        *) [ "$_t" -ge 2500 ] 2>/dev/null && [ "$_t" -le $((V_S - 100)) ] 2>/dev/null && TERM_TARGET=$_t ;;
-    esac
-fi
+# v11 公式：term = 2*V_s - 3060，随关机电压动态派生。
+# 2800 -> 2540；2900 -> 2740；3000 -> 2940；3060 -> 3060。
+TERM_TARGET=$((2 * V_S - 3060))
+[ "$TERM_TARGET" -lt 2000 ] 2>/dev/null && TERM_TARGET=2000
+[ "$TERM_TARGET" -gt 5000 ] 2>/dev/null && TERM_TARGET=5000
 ADSP_TARGET=$TERM_TARGET
-klog "关机电压 V_s=${V_S} mV，QBG 学习 term=${ADSP_TARGET} mV（term/shutdown 分离）"
+klog "关机电压 V_s=${V_S} mV，QBG 学习 term=${ADSP_TARGET} mV（v11 公式派生）"
 
 # --- 2) ★ 原生 SOC 校准：解耦写入电量计终止电压（adsp_write 主动写）---------
 # 【为什么必须主动写】解耦写入【唯一可靠路径】是模块主动 adsp_write：
