@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="light dark">
 <title>一加13解容 · WebUI</title>
-<link rel="stylesheet" href="style.css?v=37p">
+<link rel="stylesheet" href="style.css?v=38p">
 </head>
 <body>
 <div class="app" id="app">
@@ -68,14 +68,14 @@
       <div class="section-head">
         <div>
           <h2>关机电压</h2>
-          <p>V_s 决定 AP 关机电压；QBG 学习 term 单独设置，默认 2540mV</p>
+          <p>V_s 决定 AP 关机电压；ADSP 学习 term 按 v11 公式 2×V_s−3060 动态计算</p>
         </div>
         <span class="tag" id="voltageTag">2800–3060</span>
       </div>
 
       <div class="voltage-row">
         <div class="big"><span id="voltageValue">2800</span><small>mV</small></div>
-        <div class="derived">ADSP 学习 term <b id="derivedAdsp">—</b> <span id="derivedUnit"></span></div>
+        <div class="derived">ADSP 学习 term（2×V_s−3060） <b id="derivedAdsp">—</b> <span id="derivedUnit"></span></div>
       </div>
 
       <input type="range" id="voltageSlider" min="2800" max="3060" step="10" value="2800" aria-label="关机电压">
@@ -198,6 +198,6 @@
 </div>
 
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
-<script src="app.js?v=37p"></script>
+<script src="app.js?v=38p"></script>
 </body>
 </html>
