@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="light dark">
 <title>一加13解容 · WebUI</title>
-<link rel="stylesheet" href="style.css?v=38p">
+<link rel="stylesheet" href="style.css?v=39p">
 </head>
 <body>
 <div class="app" id="app">
@@ -68,14 +68,14 @@
       <div class="section-head">
         <div>
           <h2>关机电压</h2>
-          <p>V_s 决定 AP 关机电压；ADSP 学习 term 按 v11 公式 2×V_s−3060 动态计算</p>
+          <p>关机电压按下方自定义值，ADSP自动计算</p>
         </div>
         <span class="tag" id="voltageTag">2800–3060</span>
       </div>
 
       <div class="voltage-row">
         <div class="big"><span id="voltageValue">2800</span><small>mV</small></div>
-        <div class="derived">ADSP 学习 term（2×V_s−3060） <b id="derivedAdsp">—</b> <span id="derivedUnit"></span></div>
+        <div class="derived">ADSP <b id="derivedAdsp">—</b> <span id="derivedUnit"></span></div>
       </div>
 
       <input type="range" id="voltageSlider" min="2800" max="3060" step="10" value="2800" aria-label="关机电压">
@@ -97,7 +97,7 @@
       <div class="section-head">
         <div>
           <h2 id="restoreTitle">恢复原厂</h2>
-          <p id="restoreDesc">写回电量计原值，退出解耦，恢复策略与官方电量显示</p>
+          <p id="restoreDesc">恢复原厂关机电压、电量显示和省电模式策略</p>
         </div>
         <span class="tag danger" id="restoreOrigTag">原值 —</span>
       </div>
@@ -114,7 +114,7 @@
       </label>
 
       <button class="btn danger" id="restoreBtn" type="button" disabled>恢复原厂</button>
-      <p class="hint" id="restoreHint">执行前会再次确认；低电量（&lt;3300 mV 或 &lt;30%）需勾选风险确认。</p>
+      <p class="hint" id="restoreHint">执行前需确保当前电池电压&gt;3250mV</p>
     </section>
 
     <section class="card">
@@ -198,6 +198,6 @@
 </div>
 
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
-<script src="app.js?v=38p"></script>
+<script src="app.js?v=39p"></script>
 </body>
 </html>

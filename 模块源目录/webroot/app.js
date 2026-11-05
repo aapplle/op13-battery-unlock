@@ -451,7 +451,10 @@
     setText("restoreTitle", factory ? "已恢复原厂" : "恢复原厂");
     setText("restoreDesc", factory
       ? "已写回原厂值，退出解耦；Phase 1 不提供重新启用"
-      : "写回电量计原值，退出解耦，恢复策略与官方电量显示");
+      : "恢复原厂关机电压、电量显示和省电模式策略");
+    setText("restoreHint", orig === null
+      ? "执行前需确保当前电池电压>原值"
+      : "执行前需确保当前电池电压>" + orig + "mV");
     var btn = $("restoreBtn");
     if (btn) btn.textContent = factory ? "已恢复原厂" : "恢复原厂";
   }
