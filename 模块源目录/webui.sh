@@ -33,6 +33,8 @@ VBAT=$B/vbat_uv
 CHIP=$B/chip_soc
 CS=$CHIP
 CC=$B/battery_cc
+RM=$B/battery_rm
+FCC=$B/battery_fcc
 BTYPE=$B/battery_type
 
 [ -f "$MODDIR/log.sh" ] && . "$MODDIR/log.sh"
@@ -101,6 +103,8 @@ cmd_status() {
     _uvs_temp=$(_uv_temp_c)
     _uvs_counts=$(_uv_num "$DDRC")
     _uvs_cc=$(_uv_num "$CC")
+    _uvs_rm=$(_uv_num "$RM")
+    _uvs_fcc=$(_uv_raw_fcc)
     _uvs_cali=$(_uv_num "$CALI")
     _uvs_orig=$(_uv_num "$BK/adsp_orig.txt")
     _uvs_state=$(_uv_num "$BK/adsp_state")
@@ -232,6 +236,8 @@ cmd_status() {
     printf 'TEMP_C=%s\n' "$_uvs_temp"
     printf 'COUNTS=%s\n' "$_uvs_counts"
     printf 'CC=%s\n' "$_uvs_cc"
+    printf 'BATTERY_RM=%s\n' "$_uvs_rm"
+    printf 'BATTERY_FCC=%s\n' "$_uvs_fcc"
     printf 'CALI=%s\n' "$_uvs_cali"
     printf 'SKIP=%s\n' "$_uvs_skip"
     printf 'NO_REAL_SOC=%s\n' "$_uvs_nrs"

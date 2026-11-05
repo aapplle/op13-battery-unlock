@@ -205,11 +205,11 @@ body {
 }
 .hero-main { flex: 1 1 auto; min-width: 0; }
 .hero-side {
-  flex: 0 0 132px;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  gap: 10px;
+  flex: 0 0 300px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  align-content: center;
+  gap: 10px 16px;
   padding-left: 16px;
   border-left: 1px solid var(--line);
 }
@@ -1108,13 +1108,12 @@ footer .theme-note {
   .hero { flex-direction: column; }
   .hero-side {
     flex: none;
-    flex-direction: row;
+    grid-template-columns: 1fr 1fr;
     border-left: 0;
     border-top: 1px solid var(--line);
     padding: 12px 0 0;
-    gap: 18px;
+    gap: 10px 14px;
   }
-  .hero-side .divider { display: none; }
   .restore-info { grid-template-columns: 1fr 1fr; }
   .grid { grid-template-columns: 1fr; }
 }
