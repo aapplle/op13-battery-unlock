@@ -603,7 +603,7 @@
 
     if (problems === 0 && state.mode === "decoupled" &&
         kv.ADSP_MISMATCH === "0" && kv.BIND_MISMATCH === "0" && kv.POLICY === "applied") {
-      addNotice("ok", "ADSP 实际值与目标一致，解耦正常。");
+      addNotice("ok", "ADSP 实际值与目标一致，解耦正常");
     }
   }
 
@@ -651,7 +651,7 @@
       if (seq !== statusSeq) return;
       if (Date.now() - startedAt > 20000) {
         statusLoading = false;
-        showError("bad_status", "status 超时，请重试。");
+        showError("bad_status", "status 超时，请重试");
         return;
       }
       execAsync(sh("op-result status"), 5000).then(function (r) {
@@ -726,7 +726,7 @@
       function poll() {
         if (Date.now() - startedAt > OP_TIMEOUT_MS) {
           setBusy(false);
-          showError("timeout", "操作超时，请查看日志。");
+          showError("timeout", "操作超时，请查看日志");
           if (hasKsu()) loadStatus();
           resolve(null);
           return;
@@ -739,7 +739,7 @@
           }
           setBusy(false);
           if (!kv.RESULT) {
-            showError("exec_failed", "操作结果读取失败（exit=" + res.code + "）。" +
+            showError("exec_failed", "操作结果读取失败（exit=" + res.code + "）" +
               clip(res.err || res.out || "无输出", 400));
             if (hasKsu()) loadStatus();
             resolve(null);
@@ -767,13 +767,13 @@
     return execAsync(sh("run-bg op " + sub), 5000).then(function (res) {
       if (res.code === -1) {
         setBusy(false);
-        showError("no_ksu", "KernelSU 执行接口不可用。");
+        showError("no_ksu", "KernelSU 执行接口不可用");
         return null;
       }
       var kv = parseKV(res.out);
       if (kv.CODE !== "started") {
         setBusy(false);
-        showError("exec_failed", "后台任务启动失败（exit=" + res.code + "）。" +
+        showError("exec_failed", "后台任务启动失败（exit=" + res.code + "）" +
           clip(res.err || res.out || "无输出", 400));
         if (hasKsu()) loadStatus();
         return null;
@@ -816,7 +816,7 @@
     }
     var risk = $("riskCheck");
     if (risk && !risk.checked) { toast("请先勾选「我已知晓风险」"); return; }
-    if (!window.confirm("确认恢复原厂？\n\n将写回电量计原值，退出解耦，并恢复超级省电策略与官方电量显示。")) return;
+    if (!window.confirm("确认恢复原厂？\n\n将写回电量计原值，退出解耦，并恢复超级省电策略与官方电量显示")) return;
     var low = !!(state.status && state.status.BATTERY_LOW === "1");
     runOp("restore" + (low ? " --force" : ""), "恢复原厂");
   }
@@ -902,7 +902,7 @@
     if (!/^\d{1,4}$/.test(raw)) { toast("请输入 2000–5000 的整数"); return; }
     var v = parseInt(raw, 10);
     if (v < 2000 || v > 5000) { toast("ADSP 范围 2000–5000 mV"); return; }
-    if (!window.confirm("确认手动写入 ADSP = " + v + " mV？\n这会影响电量计 0% 位置，日常请用 V_s 派生。")) return;
+    if (!window.confirm("确认手动写入 ADSP = " + v + " mV？\n这会影响电量计 0% 位置，日常请用 V_s 派生")) return;
     runOp("write-adsp " + v, "写入 ADSP " + v + " mV").then(function (kv) {
       if (kv && kv.ADSP_READ) setAdspReadout(kv.ADSP_READ);
       if (kv && kv.RESULT === "ok") { if (input) input.value = ""; if (confirm) confirm.checked = false; syncDisabled(); }
