@@ -104,7 +104,9 @@ cmd_status() {
     _uvs_counts=$(_uv_num "$DDRC")
     _uvs_cc=$(_uv_num "$CC")
     _uvs_rm=$(_uv_num "$RM")
-    _uvs_fcc=$(_uv_raw_fcc)
+    _uv_fcc_read
+    _uvs_fcc=$_uvfr_v
+    _uvs_fcc_src=$_uvfr_src
     _uvs_cali=$(_uv_num "$CALI")
     _uvs_orig=$(_uv_num "$BK/adsp_orig.txt")
     _uvs_state=$(_uv_num "$BK/adsp_state")
@@ -238,6 +240,7 @@ cmd_status() {
     printf 'CC=%s\n' "$_uvs_cc"
     printf 'BATTERY_RM=%s\n' "$_uvs_rm"
     printf 'BATTERY_FCC=%s\n' "$_uvs_fcc"
+    printf 'BATTERY_FCC_SRC=%s\n' "$_uvs_fcc_src"
     printf 'CALI=%s\n' "$_uvs_cali"
     printf 'SKIP=%s\n' "$_uvs_skip"
     printf 'NO_REAL_SOC=%s\n' "$_uvs_nrs"

@@ -293,6 +293,12 @@
     return "未知";
   }
 
+  function fccSourceLabel(v) {
+    if (v === "bs" || v === "mms") return "真值";
+    if (v === "display") return "显示值";
+    return "";
+  }
+
   function setBusy(b) {
     state.busy = b;
     var bar = $("busyBar");
@@ -522,7 +528,9 @@
     setText("bindCell", bindLabel(kv));
     setText("policyCell", policyLabel(kv.POLICY));
     setText("rmCell", numOf(kv.BATTERY_RM) === null ? "—" : String(numOf(kv.BATTERY_RM)) + " mAh");
-    setText("fccCell", numOf(kv.BATTERY_FCC) === null ? "—" : String(numOf(kv.BATTERY_FCC)) + " mAh");
+    var fcc = numOf(kv.BATTERY_FCC);
+    var fccTag = fccSourceLabel(kv.BATTERY_FCC_SRC);
+    setText("fccCell", fcc === null ? "—" : String(fcc) + " mAh" + (fccTag ? "（" + fccTag + "）" : ""));
     setText("cycleCell", (cc === null ? "—" : String(cc)) + " / " + (counts === null ? "—" : String(counts)));
     setText("tempCell", temp === null ? "—" : temp + " °C");
 
