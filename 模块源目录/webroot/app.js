@@ -254,8 +254,8 @@
 
   function modeLabel() {
     switch (state.mode) {
-      case "decoupled": return "解耦中";
-      case "factory": return "原厂恢复";
+      case "decoupled": return "已解容";
+      case "factory": return "原厂模式";
       case "unloaded": return "未加载";
       case "disabled": return "已禁用";
       case "offline": return "未连接 KernelSU";
@@ -386,7 +386,7 @@
       vs = pickNum(kv.TARGET_EFFECTIVE, kv.ADSP_ORIG);
       adsp = pickNum(kv.ADSP_ORIG, kv.EXPECTED_ADSP);
     }
-    setText("heroVsLabel", factory ? "hook 强制值" : "关机电压 V_s");
+    setText("heroVsLabel", "关机电压");
     setText("heroVs", vs === null ? "—" : String(vs));
     setText("heroAdsp", adsp === null ? "—" : String(adsp));
     var rm = numOf(kv.BATTERY_RM);
@@ -431,18 +431,18 @@
 
     var hint = $("voltageHint");
     if (hint) {
-      if (factory) hint.textContent = "当前为原厂恢复模式（skip=yes）；选择 V_s 后点「重新启用并应用」，会保留两个功能开关之前的选择。";
-      else if (state.mode === "unloaded") hint.textContent = "内核模块未加载，无法应用。";
-      else if (state.mode === "disabled") hint.textContent = "模块已禁用，无法应用。";
-      else if (state.mode === "offline") hint.textContent = "未连接 KernelSU，无法读取或写入。";
-      else hint.textContent = "修改后立即生效；ADSP 写入失败会在下次开机重试。";
+      if (factory) hint.textContent = "当前已恢复原厂模式，如需继续使用请选择关机电压后点「重新启用并应用」";
+      else if (state.mode === "unloaded") hint.textContent = "内核模块未加载，无法应用";
+      else if (state.mode === "disabled") hint.textContent = "模块已禁用，无法应用";
+      else if (state.mode === "offline") hint.textContent = "未连接 KernelSU，无法读取或写入";
+      else hint.textContent = "修改后点击应用立即生效，若 ADSP 写入失败会在下次开机时重试";
     }
   }
 
   function renderRestore() {
     var kv = state.status || {};
     var volt = numOf(kv.VOLTAGE_MV);
-    var cap = numOf(kv.CAPACITY);
+    var cap = pickNum(kv.CHIP_SOC, kv.CAPACITY);
     var orig = numOf(kv.ADSP_ORIG);
 
     setText("restoreMode", state.mode === "offline" ? "—" : modeLabel());
@@ -453,11 +453,11 @@
     var factory = state.mode === "factory";
     setText("restoreTitle", factory ? "已恢复原厂" : "恢复原厂");
     setText("restoreDesc", factory
-      ? "已写回原厂值，退出解耦；Phase 1 不提供重新启用"
+      ? "已恢复原厂关机电压、电量显示和省电模式策略"
       : "恢复原厂关机电压、电量显示和省电模式策略");
     setText("restoreHint", orig === null
-      ? "执行前需确保当前电池电压>原值"
-      : "执行前需确保当前电池电压>" + orig + "mV");
+      ? "执行前需确保当前电池电压 > 原值 mV"
+      : "执行前需确保当前电池电压 > " + orig + " mV");
     var btn = $("restoreBtn");
     if (btn) btn.textContent = factory ? "已恢复原厂" : "恢复原厂";
   }
@@ -473,11 +473,13 @@
     }
     var hint = $("realSocHint");
     if (hint) {
-      if (state.mode === "factory") hint.textContent = "原厂模式下已解绑；Phase 1 不提供重新启用。";
-      else if (state.mode === "offline") hint.textContent = "未连接 KernelSU。";
+      if (state.mode === "factory") hint.textContent = "原厂模式下无法使用该功能";
+      else if (state.mode === "unloaded") hint.textContent = "模块未加载，无法使用该功能";
+      else if (state.mode === "disabled") hint.textContent = "模块已禁用，无法使用该功能";
+      else if (state.mode === "offline") hint.textContent = "未连接 KernelSU";
       else hint.textContent = noReal
-        ? "已关闭：使用官方平滑电量（no_real_soc）"
-        : "chip_soc → capacity，去掉官方平滑";
+        ? "关：使用官方平滑电量"
+        : "开：已去除官方平滑电量显示";
     }
 
     var policyOn = state.mode === "decoupled" && kv.NO_POLICY !== "yes";
@@ -487,11 +489,17 @@
       ss.setAttribute("aria-checked", policyOn ? "true" : "false");
     }
     if (state.mode === "factory") {
-      setText("superSaverHint", "原厂恢复模式：策略已恢复，重新启用后按之前的开关选择执行");
+      setText("superSaverHint", "原厂模式下无法使用该功能");
+    } else if (state.mode === "unloaded") {
+      setText("superSaverHint", "模块未加载，无法使用该功能");
+    } else if (state.mode === "disabled") {
+      setText("superSaverHint", "模块已禁用，无法使用该功能");
+    } else if (state.mode === "offline") {
+      setText("superSaverHint", "未连接 KernelSU");
     } else if (kv.NO_POLICY === "yes") {
-      setText("superSaverHint", "已关闭：允许系统在 1% 时进入超级省电；不影响 ADSP");
+      setText("superSaverHint", "关：允许系统在 1% 时进入超级省电");
     } else {
-      setText("superSaverHint", "设备策略已应用；关闭后仅恢复策略，不影响 ADSP");
+      setText("superSaverHint", "开：已禁止系统在 1% 时进入超级省电");
     }
   }
 
@@ -536,7 +544,7 @@
   function renderNotices() {
     clearNotices();
     if (!state.connected || state.mode === "offline") {
-      addNotice("error", "未连接 KernelSU：请在 KernelSU / APatch 管理器中打开本页面。当前不会执行任何命令。");
+      addNotice("error", "未连接 KernelSU：请在 KernelSU / APatch 管理器中打开本页面，当前不会执行任何命令");
       return;
     }
 
@@ -544,52 +552,52 @@
     var problems = 0;
 
     if (state.mode === "unloaded") {
-      addNotice("warn", "内核模块未加载：apply / restore / set-real-soc 不可用；请重启或检查模块是否启用。");
+      addNotice("warn", "内核模块未加载：部分模块功能不可用，请重启或检查模块是否启用");
       problems++;
     } else if (state.mode === "disabled") {
-      addNotice("warn", "模块已被禁用：仅「恢复原厂」可用；如需继续使用请先在管理器中启用模块。");
+      addNotice("warn", "模块已被禁用：仅「恢复原厂」可用，如需继续使用请先在管理器中启用模块");
       problems++;
     } else if (state.mode === "factory") {
-      addNotice("info", "当前为原厂恢复模式（skip=yes）：滑杆与应用已停用。");
+      addNotice("info", "当前为原厂模式：模块已停用");
     }
 
     if (kv.STALE_LOCK === "yes") {
-      addNotice("warn", "上次操作可能中断（陈旧锁）；请刷新状态后重试。");
+      addNotice("warn", "上次操作可能中断（陈旧锁），请刷新状态后重试");
       problems++;
     } else if (kv.LOCK === "yes") {
-      addNotice("warn", "另一个操作正在进行（webui 锁被占用）。");
+      addNotice("warn", "另一个操作正在进行（webui 锁被占用）");
       problems++;
     }
 
     if (kv.NO_ADSP_WRITE === "yes") {
-      addNotice("warn", "检测到 no_adsp_write 测试标记：写操作会被拒绝，请先删除。");
+      addNotice("warn", "检测到 no_adsp_write 测试标记：写操作会被拒绝，请先删除该文件");
       problems++;
     }
     if (kv.ADSP_ORIG_BAD === "yes") {
-      addNotice("warn", "原值记录异常（adsp_orig.bad）：请查看日志。");
+      addNotice("warn", "原值记录异常（adsp_orig.bad）：请查看日志");
       problems++;
     }
     if (kv.BATTERY_LOW === "1") {
-      addNotice("error", "电量/电压过低：恢复原厂前请先充电，并勾选风险确认。");
+      addNotice("error", "电量/电压过低：恢复原厂前请先充电，并勾选风险确认");
       problems++;
     }
     if (kv.ADSP_MISMATCH === "1") {
-      addNotice("warn", "ADSP 实际值与期望不一致（可能 uv_dev 未捕获或写入失败）；重启后会自动重试。");
+      addNotice("warn", "ADSP 实际值与期望不一致（可能 uv_dev 未捕获或写入失败），重启后会自动重试");
       problems++;
     }
     if (kv.BIND_MISMATCH === "1") {
-      addNotice("warn", "真实电量绑定状态异常：请查看日志与命名空间。");
+      addNotice("warn", "真实电量绑定状态异常：请查看日志与命名空间");
       problems++;
     }
     if (kv.PROFILE === "none" || kv.PROFILE === "unknown") {
-      addNotice("warn", "内核 profile 未匹配或未知；ADSP 相关功能可能不可用，操作结果以后端复核为准。");
+      addNotice("warn", "内核 profile 未匹配或未知：ADSP 相关功能可能不可用，操作结果以后端复核为准");
       problems++;
     }
 
     var tf = numOf(kv.TARGET_FILE);
     var pt = numOf(kv.PARAM_TARGET);
     if (state.mode === "decoupled" && tf !== null && pt !== null && tf !== pt) {
-      addNotice("warn", "target_mv 文件值（" + tf + "）与内核参数（" + pt + "）不一致：文件值待应用。");
+      addNotice("warn", "目标文件与内核参数不一致：请重新应用");
       problems++;
     }
 
