@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="light dark">
 <title>一加13解容 · WebUI</title>
-<link rel="stylesheet" href="style.css?v=39p">
+<link rel="stylesheet" href="style.css?v=40p">
 </head>
 <body>
 <div class="app" id="app">
@@ -22,7 +22,7 @@
       </div>
       <div class="brand-text">
         <h1>一加13解容</h1>
-        <p>uv2800 <span class="sep">·</span> v<span id="verText">11</span> <span class="sep">·</span> vc<span id="verCodeText">34</span></p>
+        <p>uv2800 <span class="sep">·</span> v<span id="verText">—</span></p>
       </div>
     </div>
     <div class="mode-pill offline" id="modePill"><span class="pulse"></span><span id="modeText">连接中</span></div>
@@ -56,10 +56,17 @@
           <span class="k" id="heroVsLabel">关机电压 V_s</span>
           <span class="v"><b id="heroVs">—</b><small>mV</small></span>
         </div>
-        <div class="divider"></div>
         <div class="stat">
           <span class="k">ADSP 空电点</span>
           <span class="v"><b id="heroAdsp">—</b><small>mV</small></span>
+        </div>
+        <div class="stat">
+          <span class="k">剩余电量</span>
+          <span class="v"><b id="heroRm">—</b><small>mAh</small></span>
+        </div>
+        <div class="stat">
+          <span class="k">电量计 FCC</span>
+          <span class="v"><b id="heroFcc">—</b><small>mAh</small></span>
         </div>
       </div>
     </section>
@@ -160,6 +167,8 @@
         <div class="cell"><span>启动路线</span><b id="routeCell">—</b></div>
         <div class="cell"><span>真实电量绑定</span><b id="bindCell">—</b></div>
         <div class="cell"><span>超级省电策略</span><b id="policyCell">—</b></div>
+        <div class="cell"><span>剩余电量</span><b id="rmCell">—</b></div>
+        <div class="cell"><span>电量计 FCC</span><b id="fccCell">—</b></div>
         <div class="cell"><span>循环 / 深放</span><b id="cycleCell">—</b></div>
         <div class="cell"><span>温度</span><b id="tempCell">—</b></div>
       </div>
@@ -198,6 +207,6 @@
 </div>
 
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
-<script src="app.js?v=39p"></script>
+<script src="app.js?v=40p"></script>
 </body>
 </html>

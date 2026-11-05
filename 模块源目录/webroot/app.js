@@ -343,8 +343,7 @@
 
   function renderHeader() {
     var kv = state.status || {};
-    setText("verText", kv.VERSION && kv.VERSION !== "NA" ? kv.VERSION : "11");
-    setText("verCodeText", kv.VERSION_CODE && kv.VERSION_CODE !== "NA" ? kv.VERSION_CODE : "34");
+    setText("verText", kv.VERSION && kv.VERSION !== "NA" ? kv.VERSION : "—");
     var pill = $("modePill");
     if (pill) {
       var cls = "mode-pill";
@@ -390,6 +389,10 @@
     setText("heroVsLabel", factory ? "hook 强制值" : "关机电压 V_s");
     setText("heroVs", vs === null ? "—" : String(vs));
     setText("heroAdsp", adsp === null ? "—" : String(adsp));
+    var rm = numOf(kv.BATTERY_RM);
+    var fcc = numOf(kv.BATTERY_FCC);
+    setText("heroRm", rm === null ? "—" : String(rm));
+    setText("heroFcc", fcc === null ? "—" : String(fcc));
   }
 
   function renderVoltage() {
@@ -398,8 +401,8 @@
     var factory = state.mode === "factory";
 
     setText("voltageValue", (dec || factory) ? String(state.vs) : "—");
-    setText("derivedAdsp", dec ? String(derived(state.vs)) : "—");
-    setText("derivedUnit", dec ? "mV" : "");
+    setText("derivedAdsp", (dec || factory) ? String(derived(state.vs)) : "—");
+    setText("derivedUnit", (dec || factory) ? "mV" : "");
 
     each(".quick", function (el) {
       el.classList.toggle("active", parseInt(el.getAttribute("data-v"), 10) === state.vs);
@@ -510,6 +513,8 @@
     setText("routeCell", routeLabel(kv.ROUTE));
     setText("bindCell", bindLabel(kv));
     setText("policyCell", policyLabel(kv.POLICY));
+    setText("rmCell", numOf(kv.BATTERY_RM) === null ? "—" : String(numOf(kv.BATTERY_RM)) + " mAh");
+    setText("fccCell", numOf(kv.BATTERY_FCC) === null ? "—" : String(numOf(kv.BATTERY_FCC)) + " mAh");
     setText("cycleCell", (cc === null ? "—" : String(cc)) + " / " + (counts === null ? "—" : String(counts)));
     setText("tempCell", temp === null ? "—" : temp + " °C");
 

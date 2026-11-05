@@ -196,6 +196,18 @@ _uv_derived() {
     printf '%s' "$_uv_derived_term"
 }
 
+_uv_raw_fcc() {
+    # 优先 dmesg bs_update_data 的 raw fcc；没有则退回 sysfs。
+    _uvrf_v=$(dmesg 2>/dev/null | grep 'bs_update_data' | tail -1 | sed -n 's/.* fcc=\([0-9][0-9]*\).*/\1/p')
+    if [ -z "$_uvrf_v" ]; then
+        _uvrf_v=$(cat "$FCC" 2>/dev/null | tr -d '[:space:]')
+    fi
+    case "$_uvrf_v" in
+        ''|*[!0-9]*) printf 'NA' ;;
+        *) printf '%s' "$_uvrf_v" ;;
+    esac
+}
+
 _uv_parse_mv() {
     _uvp_v=${1:-}
     case "$_uvp_v" in
