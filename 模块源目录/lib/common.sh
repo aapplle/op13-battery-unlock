@@ -196,16 +196,61 @@ _uv_derived() {
     printf '%s' "$_uv_derived_term"
 }
 
-_uv_raw_fcc() {
-    # 优先 dmesg bs_update_data 的 raw fcc；没有则退回 sysfs。
+_uv_mms_dir() {
+    printf '/sys/devices/platform/soc/soc:oplus,mms_gauge/oplus_mms/gauge'
+}
+
+_uv_fcc_read() {
+    # 设置 _uvfr_v / _uvfr_src；只读优先，C15 用 item 7 选择器读真值并恢复。
+    _uvfr_v=NA
+    _uvfr_src=NA
     _uvrf_v=$(dmesg 2>/dev/null | grep 'bs_update_data' | tail -1 | sed -n 's/.* fcc=\([0-9][0-9]*\).*/\1/p')
-    if [ -z "$_uvrf_v" ]; then
-        _uvrf_v=$(cat "$FCC" 2>/dev/null | tr -d '[:space:]')
-    fi
     case "$_uvrf_v" in
-        ''|*[!0-9]*) printf 'NA' ;;
-        *) printf '%s' "$_uvrf_v" ;;
+        ''|*[!0-9]*) ;;
+        *) _uvfr_v=$_uvrf_v; _uvfr_src=bs; return ;;
     esac
+
+    _uvg=$(_uv_mms_dir)
+    if [ -w "$_uvg/item_id" ]; then
+        _now=$(date +%s 2>/dev/null)
+        case "$_now" in ''|*[!0-9]*) _now=0 ;; esac
+        if [ -f "$BK/.fcc_raw" ]; then
+            read _cv _cs _ct < "$BK/.fcc_raw" 2>/dev/null
+            case "$_cv" in ''|*[!0-9]*) _cv=NA ;; esac
+            case "$_ct" in ''|*[!0-9]*) _ct=0 ;; esac
+            if [ "$_cv" != NA ] && [ $((_now - _ct)) -lt 60 ] 2>/dev/null; then
+                _uvfr_v=$_cv
+                _uvfr_src=$_cs
+                [ -n "$_uvfr_src" ] || _uvfr_src=mms
+                return
+            fi
+        fi
+        _orig=$(cat "$_uvg/item_id" 2>/dev/null | tr -d '[:space:]')
+        case "$_orig" in ''|*[!0-9]*) _orig=0 ;; esac
+        echo 7 > "$_uvg/item_id" 2>/dev/null
+        _raw=$(cat "$_uvg/data" 2>/dev/null | tr -d '[:space:]')
+        [ "$_orig" -gt 0 ] 2>/dev/null && echo "$_orig" > "$_uvg/item_id" 2>/dev/null
+        case "$_raw" in
+            ''|*[!0-9]*) ;;
+            *) _uvfr_v=$_raw; _uvfr_src=mms; echo "$_uvfr_v $_uvfr_src $_now" > "$BK/.fcc_raw" 2>/dev/null; return ;;
+        esac
+    fi
+
+    _uvrf_v=$(cat "$FCC" 2>/dev/null | tr -d '[:space:]')
+    case "$_uvrf_v" in
+        ''|*[!0-9]*) ;;
+        *) _uvfr_v=$_uvrf_v; _uvfr_src=display ;;
+    esac
+}
+
+_uv_raw_fcc() {
+    _uv_fcc_read
+    printf '%s' "$_uvfr_v"
+}
+
+_uv_fcc_src() {
+    _uv_fcc_read
+    printf '%s' "$_uvfr_src"
 }
 
 _uv_parse_mv() {
