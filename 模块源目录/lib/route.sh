@@ -1,11 +1,6 @@
 #!/system/bin/sh
-# ============================================================
-# uv2800 - lib/route.sh
-# 按 standard/late-load 路线与 mount namespace 跑 service.sh。
-# 依赖 lib/common.sh 的 _uv_route_log/_uv_ns_diff。
-# ============================================================
+# 按当前启动路线（standard / late-load）与挂载命名空间执行 service.sh
 
-# ---------- 跑 service.sh（路线 + 命名空间） ----------
 _uv_run_service() {
     _uvrs_late=0
     [ "$(_uv_route_log)" = "late-load" ] && _uvrs_late=1
@@ -25,4 +20,3 @@ _uv_run_service() {
         sh "$MODDIR/service.sh" >> "$LAST" 2>&1
     fi
 }
-

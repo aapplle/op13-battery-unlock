@@ -599,7 +599,14 @@ t_T4_1() { want T4.1 || return 0; case_begin T4.1 "硬重启+越狱（skip 无�
   A "vbat_uv = 2800" vbat_uv eq 2800
   A "adsp_read = $exp（已捕获 uv_dev）" adsp_read eq "$exp"
   A "bind 生效" bind_layers ge 1
-  A_log "日志含「主动触发 deep_dischg」" "主动触发 deep_dischg"
+  # 两条合法路径：A) 驱动 getter 先捕获 uv_dev，service 无需主动触发；
+  # B) service 发现未捕获，主动触发并打印日志。两者都算通过。
+  if sh_dev "$DEV_DIR/logtail.sh" 120 | grep -q -- "主动触发 deep_dischg"; then
+    ok "日志含「主动触发 deep_dischg」"
+    CASE_ASSERTS+=("PASS|日志含「主动触发 deep_dischg」|log|hit|主动触发 deep_dischg")
+  else
+    A "uv_dev 已提前捕获，无需主动触发" adsp_read ge 2001
+  fi
   case_end; }
 
 #CASE T4.2|硬重启+越狱，skip 有 → 出厂（零插拔）|late
@@ -818,10 +825,21 @@ t_T10_3() { want T10.3 || return 0; case_begin T10.3 "uv_dev 可用（捕获方�
   say "    本次开机捕获方式：active_cap=${DV[active_cap]:-?}（no=驱动开机 vote；yes=模块主动兜底）"
   case_end; }
 
-#CASE T10.4|capacity 绑定在当前（全局）命名空间生效|std
-t_T10_4() { want T10.4 || return 0; case_begin T10.4 "绑定在当前命名空间生效（未走 nsenter）"
+#CASE T10.4|capacity 绑定在全局命名空间生效（nsenter 优先）|std
+t_T10_4() { want T10.4 || return 0; case_begin T10.4 "绑定在全局命名空间生效（nsenter 优先）"
   refresh_route
-  AD "bind 方式 = 当前命名空间" bind_mode eq current
+  # 历史遗留：旧版 standard 走 current；新版统一优先 PID 1 nsenter，
+  # nsenter 不可用时才回退 current。两者都是合法绑定路径。
+  case "${DV[bind_mode]:-?}" in
+    nsenter|current)
+      ok "bind 方式 = ${DV[bind_mode]}（nsenter 全局优先，current 为回退）"
+      CASE_ASSERTS+=("PASS|bind 方式合法|bind_mode|${DV[bind_mode]}|nsenter 或 current")
+      ;;
+    *)
+      bad "bind 方式异常：${DV[bind_mode]:-?}"
+      CASE_ASSERTS+=("FAIL|bind 方式合法|bind_mode|${DV[bind_mode]:-?}|nsenter 或 current")
+      ;;
+  esac
   snap; A "bind 层数 >= 1" bind_layers ge 1
   A "capacity == chip_soc" capacity eq "${S[chip_soc]:-?}"
   case_end; }

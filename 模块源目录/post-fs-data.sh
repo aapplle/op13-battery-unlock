@@ -1,13 +1,12 @@
 #!/system/bin/sh
-# KernelSU post-fs-data: 加载 uv2800.ko
+# 标准启动模式下的早期加载脚本：等待充电驱动就绪后加载 uv2800.ko
 MODDIR=${0%/*}
 
-# 日志函数（stdout + dmesg + 落盘到备份目录）
 [ -f "$MODDIR/log.sh" ] && . "$MODDIR/log.sh"
 command -v uv_log >/dev/null 2>&1 || uv_log() { echo "uv2800: $*"; }
 uv_log_sep "post-fs-data.sh 开始"
 
-# 等待 oplus_chg_v2 加载完成（kprobe 需要它的符号），最多 30 秒
+# kprobe 依赖 oplus_chg_v2 导出的符号，最多等待 30 秒
 i=0
 while [ $i -lt 30 ]; do
     [ -d /sys/module/oplus_chg_v2 ] && break
@@ -15,15 +14,12 @@ while [ $i -lt 30 ]; do
     i=$((i+1))
 done
 
-# 若模块已在内存（软重启时 KSU 会重跑本脚本），【不要】rmmod+insmod，
-# 否则 uv_dev 会被清空。
+# 软重启时模块已在内核中，跳过加载以保留已捕获的 uv_dev 指针
 if lsmod | grep -q "^uv2800"; then
     uv_log "post-fs-data 模块已在内存，跳过 insmod（保留 uv_dev）"
     return 0 2>/dev/null || exit 0
 fi
 
-# 此处必为「未加载」（上方已「已加载则跳过」），无需再先 rmmod
 insmod "$MODDIR/uv2800.ko"
 uv_log "post-fs-data insmod rc=$? (waited ${i}s)"
-# insmod 后立刻抓内核自报的 profile 落盘（dmesg 约 10 分钟就被冲掉）
 uv_log_kver

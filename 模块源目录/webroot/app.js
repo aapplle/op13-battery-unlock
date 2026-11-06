@@ -1,6 +1,5 @@
-/* uv2800 WebUI · Phase 1
- * 仅接入 status / apply / restore / set-real-soc / log。
- * 所有数值来自 webui.sh 的 ASCII key=value 输出，无 mock 数据。
+/* uv2800 WebUI 前端控制逻辑
+ * 通过 KernelSU WebUI 桥接调用 webui.sh，解析 ASCII KEY=VALUE 响应并渲染界面状态。
  */
 (function () {
   "use strict";
@@ -171,10 +170,10 @@
   }
 
   function derived(v) {
-    // v11 公式：ADSP 学习 term = 2*V_s - 3060，随滑块动态计算。
+    // 根据关机电压 V_s 计算对应的 ADSP 终止电压：V_s < 3060 时为 2*V_s - 3060，否则等于 V_s
     var n = Number(v);
     if (!isFinite(n)) return 2540;
-    var t = 2 * n - 3060;
+    var t = n < 3060 ? (2 * n - 3060) : n;
     if (t < 2000) t = 2000;
     if (t > 5000) t = 5000;
     return t;
@@ -937,6 +936,7 @@
         state.vs = clamp(v, MIN_MV, MAX_MV);
         state.dirty = true;
         renderVoltage();
+        syncDisabled();
       });
     });
 

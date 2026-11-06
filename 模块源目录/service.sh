@@ -1,17 +1,13 @@
 #!/system/bin/sh
-# ============================================================
-# uv2800 - service.sh（服务阶段；标准启动与 late-load 越狱模式都会执行）
-#   1) 兜底 insmod（late-load 下由 late-load.sh 加载，这里是双保险）
-#   2) ★ 原生 SOC 校准：term 票锁 QBG 学习 term，shutdown 票锁 V_s（默认 2800）
-#   3) ★ 显示真实电量：bind-mount chip_soc -> capacity（去掉官方平滑滞后）
-#   4) 禁止低电量强制进入超级省电（OPPO 设备策略，COS15/16/17 通用）
-#
-# 【本脚本完全幂等】软重启后若管理器重跑 ksud late-load，可安全重复执行。
-# ============================================================
+# 服务阶段主脚本（标准启动与 late-load 模式共用，支持幂等重入）：
+#   1. 兜底检查并加载 uv2800.ko
+#   2. 捕获电量计 device 指针，按当前模式设置关机电压与 ADSP 终止电压
+#   3. 重放 votable override
+#   4. 按用户偏好同步真实电量绑定与超级省电设备策略
 MODDIR=${0%/*}
 
 P=/sys/module/uv2800/parameters
-BK=/data/adb/uv2800_backup                     # 备份目录放在模块【外】，卸载后仍存在
+BK=/data/adb/uv2800_backup
 XML=/data/system/oplus_devicepolicy_data_customize.xml
 KEY=oplus_diable_super_power_saving_mode
 TARGET_MV_DEFAULT=2800
@@ -20,19 +16,13 @@ CS=/sys/class/oplus_chg/battery/chip_soc
 CAP=/sys/class/power_supply/battery/capacity
 CAPUE=/sys/class/power_supply/battery/uevent
 
-
-# 日志函数（stdout + dmesg + 落盘到备份目录），见 log.sh
 [ -f "$MODDIR/log.sh" ] && . "$MODDIR/log.sh"
 command -v uv_log >/dev/null 2>&1 || uv_log() { echo "uv2800: $*"; }
 klog() { uv_log "$@"; }
 
-# 原值备份统一入口
-# 【为什么必须判据】曾实测到 adsp_orig.txt 被备份成 2600（解耦目标）/2800（hook 污染值），
-# 导致 action.sh 回写把 2800 当"原值"写回（真原值 3250）—— 备份一旦被污染，
-# 之后所有恢复路径都会跟着用错值。
-# 【判据】原值必须大于 FLOOR(3060)：原厂 ADSP 原值在 3060/3250 档；
-# 所以 _v <= 3060 说明 ADSP 可能被本模块（在任何 V_S 下）改写过，此时【拒绝备份】。
-# 误拒安全（DT 兜底结果相同），误接受危险（固化错误值）。
+# 备份电量计原厂终止电压：
+# 原厂终止电压高于 FLOOR_MV（3060mV）；若读出值 <= 3060mV，说明 ADSP 已被修改，
+# 拒绝将其作为原厂值备份，改为从设备树（DT）计算回填。
 backup_orig() {
     _v="$1"
     if [ -f "$BK/adsp_orig.txt" ]; then
@@ -40,7 +30,6 @@ backup_orig() {
     fi
     case "$_v" in ''|*[!0-9]*) return 1 ;; esac
     if [ "$_v" -le "$FLOOR_MV" ] 2>/dev/null; then
-        # 拒绝时用 DT 值回填，避免文件保持缺失
         _dt=$(uv_dt_orig 2>/dev/null)
         if [ -n "$_dt" ]; then
             echo "$_dt" > "$BK/adsp_orig.txt"
@@ -55,22 +44,11 @@ backup_orig() {
     return 0
 }
 
-# 查询模块最后一次【成功写入】的电量计终止电压记录（$BK/adsp_state）。
-# 用途：越狱/硬重启后 uv_dev 可能为 NULL（读不了 ADSP），此时若记录显示
-#   已经是目标值，就无需回写（不做后台补写，只做状态判定）。
-# 只在写入后【读回校验一致】时才记录；卸载时会清除，避免跨模块生命周期失效。
-adsp_known() {
-    _k=$(cat "$BK/adsp_state" 2>/dev/null | tr -d "[:space:]")
-    case "$_k" in ''|*[!0-9]*) return 1 ;; esac
-    [ "$_k" = "$1" ] && return 0
-    return 1
-}
+command -v adsp_known >/dev/null 2>&1 || adsp_known() { return 1; }
 
 uv_log_sep "service.sh 开始（KSU_LATE_LOAD=$KSU_LATE_LOAD）"
 
-# 兜底：扫描并清理【所有】其他 service.sh 进程（
-# 管不了更早的遗留进程 —— 实测发现旧版本残留的僵尸进程会一直存活到 1 小时超时）。
-# 只保留当前进程自己（$$）。
+# 清理可能残留的旧 service.sh 进程，仅保留当前进程
 _me=$$
 _n=0
 for _p in /proc/[0-9]*; do
@@ -86,15 +64,13 @@ for _p in /proc/[0-9]*; do
 done
 [ "$_n" -gt 0 ] && klog "已清理 $_n 个遗留的 service.sh 进程（只保留当前 pid=$$）"
 
-# late-load（越狱）模式下系统已完全启动，不需要等待；标准启动才需要
-# 主动触发捕获通常 1 秒内就绪，这里只留 5 秒保险，不必长时间 sleep
 if [ "$KSU_LATE_LOAD" = "1" ]; then
     klog "late-load 模式，跳过等待"
 else
     sleep 5
 fi
 
-# --- 1) 兜底 insmod（post-fs-data 时 oplus_chg_v2 可能还没就绪）---
+# 1. 兜底加载内核模块
 if ! lsmod | grep -q "^uv2800"; then
     insmod "$MODDIR/uv2800.ko" 2>/dev/null
     klog "service.sh 兜底 insmod rc=$?"
@@ -102,8 +78,7 @@ fi
 
 mkdir -p "$BK"
 
-# votable override 重放：模块 init 时四个 votable 可能尚未创建；
-# 这里写 uv_apply 并读回 1（四个都成功）。
+# 触发内核重放 votable override，等待全部 votable 就绪
 apply_votables() {
     _avi=0
     while [ "$_avi" -lt 10 ]; do
@@ -119,17 +94,7 @@ apply_votables() {
     return 1
 }
 
-# --- 1.5) ★ 统一退出「恢复模式」（放在分支之前，所有分支都被覆盖）-------
-# 【为什么统一在这里】把 uv_bypass 置 1（放行所有 hook）之后，内核里【没有】
-#   任何自动复位路径，只能由用户态显式写 resume。
-#   只要漏掉一处，vbat_uv 就会停在驱动自己算出的值、不跟随 uv_target_mv。
-#   所以在这里复位一次，任何分支（含 no_adsp_write / skip / 解耦）都覆盖，
-#   不必逐个分支各补一次。
-#   （③④ hook 同属 uv_bypass 管辖，一并被放行/恢复。）
-# 【实测依据】hook 生效（resume=0）时 vbat_uv 就是 uv_target_mv 的【即时镜像】：
-#   改 uv_target_mv=3000/3100/3250，vbat_uv 逐字跟随，零延迟、无需 vote。
-#   vbat_uv 不跟随只有一个原因 —— hook 被旁路了，
-#   不是"驱动缓存需要插拔才能刷新"。
+# 若内核 hook 处于旁路状态（resume=1），统一复位使 hook 重新生效
 if [ "$(cat "$P/resume" 2>/dev/null)" = "1" ]; then
     klog "检测到内核 hook 处于恢复模式（uv_bypass=1），写 resume=1 统一复位"
     echo 1 > "$P/resume" 2>/dev/null
@@ -137,13 +102,7 @@ if [ "$(cat "$P/resume" 2>/dev/null)" = "1" ]; then
     klog "hook 已复位（resume=$(cat "$P/resume" 2>/dev/null)），vbat_uv=$(cat /sys/class/oplus_chg/battery/vbat_uv 2>/dev/null)"
 fi
 
-# --- 1.6) ★ 自动捕获 uv_dev ----------------------------------------
-# 【为什么】uv_dev 只能由 oplus_fg_get_deep_term_volt 入口捕获，而该函数
-#   只在驱动 vote 时被调用 —— 所以还需要一条不依赖 vote 的捕获路径。
-# 【实测】oplus_fg_set_batt_deep_dischg_count 入口的 x0 与 getter 需要的 device
-#   【完全相同】，而写 deep_dischg_counts（同值即可）就能触发它。
-#   所以这里主动触发一次，后续 adsp_read/adsp_write 立即可用。
-#   失败也不影响：后续分支仍有兜底逻辑处理。
+# 检查 uv_dev 是否已捕获，未捕获时通过 deep_dischg_counts 主动触发一次
 echo 1 > "$P/adsp_read" 2>/dev/null
 _uvd=$(cat "$P/adsp_read" 2>/dev/null)
 case "$_uvd" in ''|*[!0-9]*) _uvd=0 ;; esac
@@ -155,11 +114,7 @@ if [ "$_uvd" -le 2000 ] 2>/dev/null; then
     klog "触发后 adsp_read=$(cat "$P/adsp_read" 2>/dev/null)"
 fi
 
-# --- * 关机电压自定义 + QBG term 分离 -------------------------------
-# 用户可调：关机电压 V_s（2800~3060，默认 2800），落盘 $BK/target_mv。
-# term 默认 2540，可用 $BK/term_mv 覆盖；GAUGE_TERM/TARGET_TERM=T，
-# GAUGE_SHUTDOWN/TARGET_SHUTDOWN=V_s；C16/17 四票分离，C15 两票 + 2800 地板。
-# 不再派生 2540，也不再做温度/老化补偿。
+# 读取并校验关机电压目标值 V_s（2800~3060mV），并计算对应的学习终止电压 T
 if [ ! -f "$BK/target_mv" ]; then
     echo "$TARGET_MV_DEFAULT" > "$BK/target_mv"
     klog "已生成 $BK/target_mv = $TARGET_MV_DEFAULT（关机电压，可调 2800~3060）"
@@ -168,53 +123,26 @@ V_S=$(cat "$BK/target_mv" 2>/dev/null | tr -d "[:space:]")
 case "$V_S" in
     ''|*[!0-9]*) V_S=$TARGET_MV_DEFAULT ;;
 esac
-# 范围校验：2800~3060，越界则拒绝并回退默认值
 if [ "$V_S" -lt 2800 ] 2>/dev/null || [ "$V_S" -gt 3060 ] 2>/dev/null; then
     klog "⚠️ target_mv=$V_S 超出范围 2800~3060，回退默认值 $TARGET_MV_DEFAULT"
     V_S=$TARGET_MV_DEFAULT
     echo "$V_S" > "$BK/target_mv"
 fi
-# v11 公式：term = 2*V_s - 3060，随关机电压动态派生。
-# 2800 -> 2540；2900 -> 2740；3000 -> 2940；3060 -> 3060。
 TERM_TARGET=$((2 * V_S - 3060))
 [ "$TERM_TARGET" -lt 2000 ] 2>/dev/null && TERM_TARGET=2000
 [ "$TERM_TARGET" -gt 5000 ] 2>/dev/null && TERM_TARGET=5000
 ADSP_TARGET=$TERM_TARGET
-klog "关机电压 V_s=${V_S} mV，QBG 学习 term=${ADSP_TARGET} mV（v11 公式派生）"
+klog "关机电压 V_s=${V_S} mV，QBG 学习 term=${ADSP_TARGET} mV（公式派生）"
 
-# --- 2) ★ 原生 SOC 校准：解耦写入电量计终止电压（adsp_write 主动写）---------
-# 【为什么必须主动写】解耦写入【唯一可靠路径】是模块主动 adsp_write：
-#   驱动只在「vote 目标 != 当前 ADSP」时才调 setter 写 term，日常 vote 目标=3250
-#   =ADSP 原值，值相同驱动不写 -> setter hook（④）日常不触发 -> 单靠被动拦截
-#   无法把 ADSP 改成目标值。只有 adsp_write 主动调
-#   oplus_fg_set_deep_term_volt(uv_dev, ADSP_TARGET) 才会真正写进 ADSP。
-#   （④ 并非全程不触发：驱动定期把 ADSP 纠回它在 ③ 处读到的值时 ④ 会执行，
-#    并把写入值统一成 uv_adsp_mv —— 见内核 uv_term_set 注释。）
-# 【两种模式统一用 adsp_write】，区别只在 uv_dev 是否已捕获：
-#   ① 标准模式：开机 vote 时 getter 已捕获 uv_dev -> 直接 adsp_write 写 ADSP_TARGET。
-#   ② 越狱模式：开机 vote 已错过，uv_dev=NULL -> 由 kp_ddrc 补捕获。
-# 电量计【实时读取】ADSP term，但 fcc 重算仍需一次满电状态切换。
-
-
-
+# 2. 按模式设置内核参数并写入 ADSP 终止电压
 if [ -f "$BK/no_adsp_write" ]; then
     klog "检测到 no_adsp_write 标记，本次不写电量计终止电压（测试用）"
 elif [ -f "$BK/skip" ]; then
-    # skip 由 action.sh 回写原值后创建。若存在说明用户已手动恢复，
-    # 本次开机/软重启【不再】重新施加解耦，否则会把用户的恢复覆盖回解耦目标。
+    # skip 存在表示处于原厂恢复模式：将内核参数与 ADSP 终止电压均保持为原厂值
     klog "检测到 skip 标记（已手动恢复原值），本次不施加解耦"
-    # --- ★ skip 语义 = 完全恢复原厂，三件事都要做到
-    # 【为什么不能用恢复模式代替】写 resume=0 是【进入】恢复模式，方向反了：
-    #   它（uv_bypass=1）只能让 hook"不再污染"，无法修正已经被污染的值。
-    # 【正确做法】hook 直接返回运行时参数 uv_target_mv：
-    #   只要 hook 生效（uv_bypass=0），vbat_uv 就是它的【即时镜像】——
-    #   不依赖任何 vote、不怕模块重载。
-    # 【ADSP 也要一起恢复】否则"skip 存在但 ADSP 仍是解耦目标"仍不一致
-    #   （手动 touch skip、或 rm skip 解耦后再 touch skip 都会留下解耦目标）。
     _orig=$(cat "$BK/adsp_orig.txt" 2>/dev/null | tr -d "[:space:]")
     case "$_orig" in ""|*[!0-9]*) _orig="" ;; esac
-    # adsp_orig.txt 缺失/无效/疑似污染时，回退到 DT 查表
-    # 读取侧静态判据：<3000 视为污染（DT 表最低档 = 3000），走 DT 兜底
+    # 读取侧判据：低于设备树最低档（3000mV）视为异常，退回设备树查表重算
     if [ -z "$_orig" ] || [ "$_orig" -lt 3000 ] 2>/dev/null || [ "$_orig" -gt 5000 ] 2>/dev/null; then
         _orig=$(uv_dt_orig)
         if [ -n "$_orig" ]; then
@@ -223,8 +151,6 @@ elif [ -f "$BK/skip" ]; then
         fi
     fi
     if [ -n "$_orig" ] && [ "$_orig" -ge 3000 ] 2>/dev/null && [ "$_orig" -le 5000 ] 2>/dev/null; then
-        # ① hook 强制值设为原厂（保证 vbat_uv 恒为原厂）。
-        #    退出「恢复模式」已提到脚本开头统一处理（见 1.5 节），这里只设值。
         if [ "$(cat "$P/uv_shutdown_mv" 2>/dev/null)" != "$_orig" ]; then
             echo "$_orig" > "$P/uv_shutdown_mv" 2>/dev/null
             echo "$_orig" > "$P/uv_target_mv" 2>/dev/null
@@ -233,13 +159,8 @@ elif [ -f "$BK/skip" ]; then
             sleep 1
             klog "已把内核 hook 强制值设为原厂 ${_orig} mV，vbat_uv=$(cat /sys/class/oplus_chg/battery/vbat_uv 2>/dev/null)"
         fi
-        # ② ★ 同时把 ADSP 也恢复为原厂（skip 语义 = 完全恢复原厂）。
-        #   只改 hook 不改 ADSP 会造成"skip 存在但 ADSP 仍是解耦目标"的不一致：
-        #   手动 touch skip、或 rm skip 解耦后再 touch skip，都会留下解耦目标。
-        #   写入后读回校验，一致才记录 adsp_state（供 uv_dev 未捕获时判定）。
         _cur=$(echo 1 > "$P/adsp_read" 2>/dev/null; cat "$P/adsp_read" 2>/dev/null)
         if [ -n "$_cur" ] && [ "$_cur" -gt 2000 ] 2>/dev/null; then
-            # 无论是否需要回写，都先同步 uv_adsp_mv（消除状态不一致）
             echo "$_orig" > "$P/uv_adsp_mv" 2>/dev/null
             if [ "$_cur" != "$_orig" ]; then
                 echo "$_orig" > "$P/adsp_write" 2>/dev/null
@@ -251,9 +172,6 @@ elif [ -f "$BK/skip" ]; then
                 echo "$_orig" > "$BK/adsp_state" 2>/dev/null
             fi
         else
-            # ③ ★ uv_dev 未捕获时，若记录显示已是原厂就跳过恢复。
-            #    不做后台补写：主动触发后通常 1 秒即就绪，前面的探测循环
-            #    已相当于同步重试，此处只做状态判定，不另起兜底进程。
             if adsp_known "$_orig"; then
                 klog "uv_dev 未捕获，但 adsp_state 记录显示 ADSP 已是原厂 ${_orig} mV，无需恢复"
             else
@@ -265,24 +183,18 @@ elif [ -f "$BK/skip" ]; then
     fi
     klog "若要重新自动解耦，请执行：rm $BK/skip 后重启"
 elif [ -w "$P/adsp_read" ]; then
-    # --- ★ 把 hook 强制值设为用户自定义的 V_s -------------------------
-    # 若上一轮处于 skip（已恢复原厂）模式，uv_target_mv 被设成了原厂值；
-    # 这里（解耦模式）必须复位回 V_s，否则 hook 会继续强制原厂值，解耦失效。
+    # 解耦模式：更新关机电压与学习终止电压参数，并将终止电压写入 ADSP
     if [ "$(cat "$P/uv_shutdown_mv" 2>/dev/null)" != "$V_S" ]; then
         echo "$V_S" > "$P/uv_shutdown_mv" 2>/dev/null
         echo "$V_S" > "$P/uv_target_mv" 2>/dev/null
         klog "已把 shutdown hook 强制值设为 ${V_S} mV（解耦模式）"
     fi
-    # term 与 shutdown 分离：uv_term_mv 是 QBG 学习目标，uv_adsp_mv 兼容旧名
     echo "$ADSP_TARGET" > "$P/uv_term_mv" 2>/dev/null
     echo "$ADSP_TARGET" > "$P/uv_adsp_mv" 2>/dev/null
 
-    # 退出「恢复模式」已提到脚本开头统一处理（见 1.5 节）。
-
-    # 探测 uv_dev 是否就绪。主动触发捕获后通常 0-1 秒就绪，10 秒足够。
+    # 轮询等待 uv_dev 就绪（最长 10 秒），期间若出现 skip 标记则立即中止
     i=0; cur=""; _probe=ok
     while [ $i -lt 10 ]; do
-        # 用户点「恢复原厂」后会出现 skip 标记，立刻停手，不要覆盖用户的恢复
         if [ -f "$BK/skip" ]; then
             klog "检测到 skip 标记（用户已手动恢复），停止解耦探测"
             _probe=skip
@@ -296,8 +208,6 @@ elif [ -w "$P/adsp_read" ]; then
         i=$((i+1))
     done
 
-    # 内核侧 adsp_read 默认静默（见 adsp_debug 参数），改由这里汇总一条。
-    # 既保留「就绪耗时」这个真正有用的指标，又消掉每次开机最多 10 行（探测循环 10 次）的 dmesg 噪音。
     if [ "$_probe" = "ok" ]; then
         if [ -n "$cur" ]; then
             klog "ADSP 探测：${i}s 后就绪（终止电压 ${cur} mV）"
@@ -306,14 +216,11 @@ elif [ -w "$P/adsp_read" ]; then
         fi
     fi
 
-    # skip 出现后不再写入（防止覆盖用户刚恢复的原值）
     [ -f "$BK/skip" ] && cur=""
 
     if [ -n "$cur" ]; then
-        # ① uv_dev 就绪：主动写入（写后读回校验，一致才记录 adsp_state）
         if [ "$cur" != "$ADSP_TARGET" ]; then
             backup_orig "$cur"
-            # 先同步 term（③④ hook 的目标），再写 ADSP
             echo "$ADSP_TARGET" > "$P/uv_term_mv" 2>/dev/null
             echo "$ADSP_TARGET" > "$P/uv_adsp_mv" 2>/dev/null
             echo "$ADSP_TARGET" > "$P/adsp_write"
@@ -323,16 +230,12 @@ elif [ -w "$P/adsp_read" ]; then
         else
             klog "电量计终止电压已是 ${ADSP_TARGET} mV，无需写入"
             echo "$ADSP_TARGET" > "$BK/adsp_state" 2>/dev/null
-            # ADSP 已是目标值时，若 adsp_orig.txt 缺失也用 DT 回填
             if [ ! -f "$BK/adsp_orig.txt" ]; then
                 _dt=$(uv_dt_orig 2>/dev/null)
                 [ -n "$_dt" ] && echo "$_dt" > "$BK/adsp_orig.txt"
             fi
         fi
     else
-        # ② uv_dev 未就绪：前面已用自动捕获尝试过（写 deep_dischg_counts 同值）。
-        #    不做后台补写 —— 驱动不支持该入口时，本次开机即放弃写入，
-        #    由下次开机重试（实测正常驱动 1 秒内就绪）。
         if adsp_known "$ADSP_TARGET"; then
             klog "uv_dev 未捕获，但 adsp_state 记录显示 ADSP 已是 ${ADSP_TARGET} mV，无需写入"
         else
@@ -340,15 +243,10 @@ elif [ -w "$P/adsp_read" ]; then
         fi
     fi
 fi
-# 重放四个 votable override（skip/正常分支都已设好 uv_target_mv）
+
 apply_votables
 
-# --- 3) 用户功能：真实电量 / 禁止超级省电（独立偏好）---------------
-# 两个功能不再由 service.sh 无条件覆盖，而是按用户标记执行：
-#   no_real_soc 存在 = 关闭真实电量；默认开启（无文件）
-#   no_policy   存在 = 关闭「禁止 1% 超级省电」；默认开启（无文件）
-#   skip 优先 = 完全恢复原厂：强制解绑 + 恢复策略
-# 实现集中在 lib/features.sh；本脚本只负责按偏好调用，不复制算法。
+# 3. 同步用户可选功能（真实电量显示 / 禁止 1% 超级省电）
 if [ -f "$MODDIR/lib/features.sh" ]; then
     . "$MODDIR/lib/features.sh"
 fi
