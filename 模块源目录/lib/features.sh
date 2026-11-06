@@ -1,23 +1,13 @@
 #!/system/bin/sh
-# ============================================================
-# uv2800 - lib/features.sh
-# 两个独立用户功能：真实电量 bind / 禁止 1% 超级省电策略。
-# 只被 service.sh（开机按偏好执行）和 webui.sh（用户开关）source。
-#
-# 约定：
-#   no_real_soc 存在 = 关闭真实电量；默认开启（无文件）
-#   no_policy   存在 = 关闭「禁止 1% 超级省电」；默认开启（无文件）
-#   skip        优先 = 完全恢复原厂：强制解绑 + 恢复策略
-#
-# 调用前必须已定义：
-#   BK XML KEY CS CAP CAPUE klog uv_unbind_capacity
-# ============================================================
+# 用户可选功能实现库（由 service.sh 和 webui.sh 共用）：
+#   1. 真实电量显示（bind-mount chip_soc -> capacity，由 $BK/no_real_soc 控制）
+#   2. 禁止 1% 强制超级省电（oplusdevicepolicy，由 $BK/no_policy 控制）
+#   当 $BK/skip 存在时优先解绑并恢复原厂设备策略。
 
 feature_real_soc_bind() {
     uv_unbind_capacity "$CAP" "$CAPUE"
     _frs_bound=0
-    # 先试 PID 1 全局命名空间：late-load / WebUI root shell 的当前 ns
-    # 可能看不到 chip_soc/capacity，不能先做存在性检查。
+    # 优先进入 PID 1 的全局挂载命名空间执行绑定，确保 system_server 可见
     if command -v nsenter >/dev/null 2>&1; then
         if nsenter -t 1 -m -- mount --bind "$CS" "$CAP" 2>/dev/null; then
             _frs_bound=1

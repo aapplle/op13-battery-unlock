@@ -1,10 +1,7 @@
 #!/system/bin/sh
-# ============================================================
-# uv2800 - webui.sh（WebUI 薄后端 / CLI）
-#
-# 只调用既有脚本与 log.sh 里的既有函数；不复制 ADSP/策略/bind 算法。
-# 所有异步输出都是 ASCII key=value；自由文本只走 log（同步 exec）。
-# ============================================================
+# WebUI 后端命令入口（CLI）
+# 封装状态查询、电压应用、恢复原厂、独立功能开关及后台任务轮询接口，
+# 状态与操作结果统一以 ASCII KEY=VALUE 格式输出。
 
 case "$0" in
     */*) _uv_dir=${0%/*} ;;
@@ -687,9 +684,8 @@ cmd_run_bg() {
     _uvbg_out="$BK/.webui_op.$_uvbg_tag.out"
     _uvbg_rc="$BK/.webui_op.$_uvbg_tag.rc"
     rm -f "$_uvbg_out" "$_uvbg_rc"
-    # 双 fork + setsid + 关闭继承 fd：让真正的命令脱离当前 shell/会话。
-    # 只重定向还不够——子 shell 继承的 fd 会让 ksu.exec 同步桥等到命令结束。
-    ( ( exec setsid sh -c 'o=$1; r=$2; shift 2; sh "$0" "$@" >"$o" 2>&1; echo $? >"$r"' \
+    # 双 fork + setsid 并关闭继承的文件描述符，避免后台子进程阻塞 ksu.exec 调用返回
+    ( ( exec setsid sh -c 'o=$1; r=$2; shift 2; sh "$0" "$@" >"$o" 2>&1; echo $? >"$r.tmp" && mv -f "$r.tmp" "$r"' \
         "$MODDIR/webui.sh" "$_uvbg_out" "$_uvbg_rc" "$@" ) \
         </dev/null >/dev/null 2>&1 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&- & ) &
     printf 'RESULT=ok\nCODE=started\n'

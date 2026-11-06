@@ -37,8 +37,9 @@ fi
 [ -n "$_p" ] || _psrc=?
 echo "dev_profile=${_p:-?}"
 echo "dev_profile_src=${_psrc}"
-_h="$(dmesg 2>/dev/null | grep -o 'v11 ready, [0-9]* 个 hook' | tail -1)"
-[ -z "$_h" ] && _h="$(grep -o 'v11 ready, [0-9]* 个 hook' /data/adb/uv2800_backup/uv2800.log 2>/dev/null | tail -1)"
+# 不锁死内核日志里的版本号：v11/v12/v12.1 等都应能匹配。
+_h="$(dmesg 2>/dev/null | grep -oE 'v[0-9]+([.][0-9]+)* ready, [0-9]+ 个 hook' | tail -1)"
+[ -z "$_h" ] && _h="$(grep -oE 'v[0-9]+([.][0-9]+)* ready, [0-9]+ 个 hook' /data/adb/uv2800_backup/uv2800.log 2>/dev/null | tail -1)"
 echo "dev_hooks=${_h:-?}"
 echo "dev_uptime=$(cut -d' ' -f1 /proc/uptime 2>/dev/null)"
 # 越狱 profile 指纹（GLK1：release 字符串从第 16 字节起）—— 兼容矩阵要记「这次越狱用的哪份」

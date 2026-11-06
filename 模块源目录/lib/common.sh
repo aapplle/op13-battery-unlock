@@ -1,27 +1,26 @@
 #!/system/bin/sh
-# ============================================================
-# uv2800 - lib/common.sh
-# 纯读取/状态辅助函数；只被 webui.sh source。
-# 依赖调用方已定义：BK P MOD CAP VOLT TEMP DDRC CALI VBAT CHIP CC CS CAPUE FLOOR LOG
-# 不写任何状态（adsp_read 的触发读除外）。
-# ============================================================
+# WebUI 状态读取与数值解析辅助库（由 webui.sh 加载）
 
-# ---------- 基础读取 ----------
+_uv_strip_zeros() {
+    _uvsz_v=$1
+    while :; do
+        case "$_uvsz_v" in
+            0?*) _uvsz_v=${_uvsz_v#0} ;;
+            *) break ;;
+        esac
+    done
+    case "$_uvsz_v" in
+        ''|*[!0-9]*) _uvsz_v=0 ;;
+    esac
+    printf '%s' "$_uvsz_v"
+}
+
 _uv_num() {
     _uvn_v=$(cat "$1" 2>/dev/null | tr -d '[:space:]')
     case "$_uvn_v" in
         ''|*[!0-9]*) printf 'NA'; return 1 ;;
     esac
-    while :; do
-        case "$_uvn_v" in
-            0?*) _uvn_v=${_uvn_v#0} ;;
-            *) break ;;
-        esac
-    done
-    case "$_uvn_v" in
-        ''|*[!0-9]*) _uvn_v=0 ;;
-    esac
-    printf '%s' "$_uvn_v"
+    _uv_strip_zeros "$_uvn_v"
 }
 
 _uv_yesno() {
@@ -105,15 +104,7 @@ _uv_read_adsp() {
     case "$_uvra_v" in
         ''|*[!0-9]*) printf 'NA'; return ;;
     esac
-    while :; do
-        case "$_uvra_v" in
-            0?*) _uvra_v=${_uvra_v#0} ;;
-            *) break ;;
-        esac
-    done
-    case "$_uvra_v" in
-        ''|*[!0-9]*) _uvra_v=0 ;;
-    esac
+    _uvra_v=$(_uv_strip_zeros "$_uvra_v")
     if [ "$_uvra_v" -gt 2000 ] 2>/dev/null; then
         printf '%s' "$_uvra_v"
     else
@@ -134,7 +125,7 @@ _uv_route_log() {
 }
 
 _uv_profile() {
-    _uvpr_v=$(dmesg 2>/dev/null | grep 'uv2800: v11 ready' | tail -1 | sed -n 's/.*profile=\[\([^]]*\)\].*/\1/p')
+    _uvpr_v=$(dmesg 2>/dev/null | grep 'uv2800: v12 ready' | tail -1 | sed -n 's/.*profile=\[\([^]]*\)\].*/\1/p')
     if [ -z "$_uvpr_v" ]; then
         _uvpr_v=$(grep 'profile=' "$LOG" 2>/dev/null | tail -1 | sed -n 's/.*profile=\[\([^]]*\)\].*/\1/p')
     fi
@@ -179,20 +170,28 @@ _uv_loaded() {
 }
 
 _uv_term_target() {
-    # QBG 学习 term 与 AP shutdown 分离；优先读内核参数，其次落盘默认值。
     _uvtt_v=$(cat "$P/uv_term_mv" 2>/dev/null | tr -d '[:space:]')
     case "$_uvtt_v" in
         ''|*[!0-9]*) _uvtt_v=$(cat "$BK/term_mv" 2>/dev/null | tr -d '[:space:]') ;;
     esac
     case "$_uvtt_v" in
-        ''|*[!0-9]*) _uvtt_v=2540 ;;
+        ''|*[!0-9]*)
+            if [ -n "${1:-}" ] && [ "$1" -ge 2000 ] 2>/dev/null; then
+                if [ "$1" -lt 3060 ] 2>/dev/null; then
+                    _uvtt_v=$((2 * $1 - 3060))
+                else
+                    _uvtt_v=$1
+                fi
+            else
+                _uvtt_v=2540
+            fi
+            ;;
     esac
     printf '%s' "$_uvtt_v"
 }
 
 _uv_derived() {
-    # 兼容旧调用：ADSP 期望值现在取学习 term，而不是 V_s。
-    _uv_derived_term=$(_uv_term_target)
+    _uv_derived_term=$(_uv_term_target "${1:-}")
     printf '%s' "$_uv_derived_term"
 }
 
@@ -200,10 +199,27 @@ _uv_mms_dir() {
     printf '/sys/devices/platform/soc/soc:oplus,mms_gauge/oplus_mms/gauge'
 }
 
+# 读取电量计 FCC：
+# 优先命中 60 秒内的缓存；否则依次尝试 dmesg 的 bs_update_data、oplus_mms 的 item 7（GAUGE_ITEM_FCC），
+# 最后回退到 sysfs 的 battery_fcc 显示值。
 _uv_fcc_read() {
-    # 设置 _uvfr_v / _uvfr_src；只读优先，C15 用 item 7 选择器读真值并恢复。
     _uvfr_v=NA
     _uvfr_src=NA
+    _now=$(date +%s 2>/dev/null)
+    case "$_now" in ''|*[!0-9]*) _now=0 ;; esac
+    if [ -f "$BK/.fcc_raw" ]; then
+        read _cv _cs _ct < "$BK/.fcc_raw" 2>/dev/null
+        case "$_cv" in ''|*[!0-9]*) _cv=NA ;; esac
+        case "$_ct" in ''|*[!0-9]*) _ct=0 ;; esac
+        _age=$((_now - _ct))
+        if [ "$_cv" != NA ] && [ "$_now" -gt 0 ] 2>/dev/null && [ "$_age" -ge 0 ] 2>/dev/null && [ "$_age" -lt 60 ] 2>/dev/null; then
+            _uvfr_v=$_cv
+            _uvfr_src=$_cs
+            [ -n "$_uvfr_src" ] || _uvfr_src=mms
+            return
+        fi
+    fi
+
     _uvrf_v=$(dmesg 2>/dev/null | grep 'bs_update_data' | tail -1 | sed -n 's/.* fcc=\([0-9][0-9]*\).*/\1/p')
     case "$_uvrf_v" in
         ''|*[!0-9]*) ;;
@@ -212,20 +228,6 @@ _uv_fcc_read() {
 
     _uvg=$(_uv_mms_dir)
     if [ -w "$_uvg/item_id" ]; then
-        _now=$(date +%s 2>/dev/null)
-        case "$_now" in ''|*[!0-9]*) _now=0 ;; esac
-        if [ -f "$BK/.fcc_raw" ]; then
-            read _cv _cs _ct < "$BK/.fcc_raw" 2>/dev/null
-            case "$_cv" in ''|*[!0-9]*) _cv=NA ;; esac
-            case "$_ct" in ''|*[!0-9]*) _ct=0 ;; esac
-            _age=$((_now - _ct))
-            if [ "$_cv" != NA ] && [ "$_now" -gt 0 ] 2>/dev/null && [ "$_age" -ge 0 ] 2>/dev/null && [ "$_age" -lt 60 ] 2>/dev/null; then
-                _uvfr_v=$_cv
-                _uvfr_src=$_cs
-                [ -n "$_uvfr_src" ] || _uvfr_src=mms
-                return
-            fi
-        fi
         _orig=$(cat "$_uvg/item_id" 2>/dev/null | tr -d '[:space:]')
         case "$_orig" in ''|*[!0-9]*) _orig=0 ;; esac
         echo 7 > "$_uvg/item_id" 2>/dev/null
@@ -244,30 +246,12 @@ _uv_fcc_read() {
     esac
 }
 
-_uv_raw_fcc() {
-    _uv_fcc_read
-    printf '%s' "$_uvfr_v"
-}
-
-_uv_fcc_src() {
-    _uv_fcc_read
-    printf '%s' "$_uvfr_src"
-}
-
 _uv_parse_mv() {
     _uvp_v=${1:-}
     case "$_uvp_v" in
         ''|*[!0-9]*) return 1 ;;
     esac
-    while :; do
-        case "$_uvp_v" in
-            0?*) _uvp_v=${_uvp_v#0} ;;
-            *) break ;;
-        esac
-    done
-    case "$_uvp_v" in
-        ''|*[!0-9]*) return 1 ;;
-    esac
+    _uvp_v=$(_uv_strip_zeros "$_uvp_v")
     [ ${#_uvp_v} -le 4 ] || return 1
     [ "$_uvp_v" -ge 2800 ] 2>/dev/null || return 1
     [ "$_uvp_v" -le 3060 ] 2>/dev/null || return 1
@@ -280,20 +264,10 @@ _uv_orig_ref() {
     case "$_uvor_v" in
         ''|*[!0-9]*) : ;;
         *)
-            while :; do
-                case "$_uvor_v" in
-                    0?*) _uvor_v=${_uvor_v#0} ;;
-                    *) break ;;
-                esac
-            done
-            case "$_uvor_v" in
-                ''|*[!0-9]*) : ;;
-                *)
-                    if [ "$_uvor_v" -ge 3000 ] 2>/dev/null && [ "$_uvor_v" -le 5000 ] 2>/dev/null; then
-                        printf '%s' "$_uvor_v"; return 0
-                    fi
-                    ;;
-            esac
+            _uvor_v=$(_uv_strip_zeros "$_uvor_v")
+            if [ "$_uvor_v" -ge 3000 ] 2>/dev/null && [ "$_uvor_v" -le 5000 ] 2>/dev/null; then
+                printf '%s' "$_uvor_v"; return 0
+            fi
             ;;
     esac
     _uvor_v=$(uv_dt_orig 2>/dev/null | tail -1 | tr -d '[:space:]')
@@ -305,4 +279,3 @@ _uv_orig_ref() {
     fi
     printf '%s' "$_uvor_v"
 }
-

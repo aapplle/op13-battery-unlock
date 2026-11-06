@@ -1,11 +1,6 @@
 #!/system/bin/sh
-# ============================================================
-# uv2800 - lib/verify.sh
-# apply/enable 的读回复核；只被 webui.sh source。
-# 依赖 lib/common.sh 的 _uv_num/_uv_read_adsp/_uv_bind_* 等。
-# ============================================================
+# apply / enable 操作执行后的状态读回复核
 
-# ---------- 复核（apply / enable 共用） ----------
 _uv_verify_core() {
     _uvc_mv=$1
     _uvc_exp=$2
@@ -99,4 +94,3 @@ _uv_verify_core() {
     printf 'POLICY_OK=%s\n' "$_uvc_pok"
     printf 'DETAIL=rc:%s\n' "${_uvc_rc:-NA}"
 }
-
