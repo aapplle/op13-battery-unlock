@@ -29,7 +29,7 @@
 #   UV_ROUTE    强制路线 standard|late-load（默认由 dev/route.sh 判定）
 #   UV_WIFI     无线 adb 地址（可选，如 <DEVICE_IP>:5555）
 #   UV_FLOOR    ADSP 派生的 floor（默认 3060 = 新机原厂关机电压）
-#   UV_ZIP      模块 zip 路径（默认 = ../02-当前最新构建/一加13解容-v11.zip）
+#   UV_ZIP      模块 zip 路径（默认 = ../一加13解容-v12.zip）
 #   UV_DT=1     开启可选组 TD（默认关闭；见下方 TD 组说明）
 #
 # 输出：results/<时间戳>/{report.json,report.md,logs/}
@@ -45,7 +45,7 @@ DEV_DIR="$HERE/dev"
 DEV_TMP=/data/local/tmp/uvtest
 FLOOR="${UV_FLOOR:-3060}"   # 规格：FLOOR=3060（= 新机原厂关机电压 = 电量计模型计数下限）
 # P2-12 修复（2026-10-04）：默认改为当前构建产物（原指向已不存在的 ../ksu-module/v10.19.zip）
-ZIP="${UV_ZIP:-$HERE/../02-当前最新构建/一加13解容-v11.zip}"
+ZIP="${UV_ZIP:-$HERE/../一加13解容-v12.zip}"
 JAILBREAK_CMD="/data/local/tmp/ghostlock --load-prebuilt-profile /data/local/tmp/profile.bin"
 TS="$(date +%Y%m%d-%H%M%S)"
 OUT="${UV_OUT:-$HERE/results/$TS}"   # UV_OUT 可覆盖（冒烟/试跑时避免污染 results/）
