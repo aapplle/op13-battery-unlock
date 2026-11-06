@@ -7,17 +7,17 @@
       本运行器对每个用例断言【预期结果】，假绿会被判 FAIL。
 
 用法：
-    python3 自动化测试矩阵/dt_inject/run_cases.py            # 跑全部
-    python3 自动化测试矩阵/dt_inject/run_cases.py valid rr4  # 只跑指定用例
+    python3 03-自动化测试矩阵/dt_inject/run_cases.py            # 跑全部
+    python3 03-自动化测试矩阵/dt_inject/run_cases.py valid rr4  # 只跑指定用例
 退出码：0 = 全部符合预期；1 = 有 FAIL
 
 位置无关：路径全部相对本文件定位（HERE = 本脚本所在目录），整体搬移不影响运行。
 """
 import os, sys, json, subprocess
 
-HERE = os.path.dirname(os.path.abspath(__file__))     # 自动化测试矩阵/dt_inject
+HERE = os.path.dirname(os.path.abspath(__file__))     # 03-自动化测试矩阵/dt_inject
 ROM  = os.path.dirname(os.path.dirname(HERE))         # 仓库根
-LOG  = os.environ.get("UV_DT_LOG", os.path.join(ROM, "模块源目录/log.sh"))   # 可覆盖：用于哨兵自测
+LOG  = os.environ.get("UV_DT_LOG", os.path.join(ROM, "02-当前最新构建/模块源目录/log.sh"))   # 可覆盖：用于哨兵自测
 ROOT = os.path.join(HERE, "dtgen")
 MAN  = json.load(open(os.path.join(ROOT, "manifest.json")))
 

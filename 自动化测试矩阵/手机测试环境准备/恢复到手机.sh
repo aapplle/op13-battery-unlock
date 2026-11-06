@@ -16,7 +16,7 @@
 #   UV_SERIAL=<serial>                         指定设备（默认取第一个 USB 设备）
 #
 #   现场生成用的 boot.img：优先用本地已抽好的副本
-#     <EXTERNAL>/厂商驱动与固件/boot_imgs/（6 份，覆盖各内核 release）
+#     05-逆向脚本与产物/厂商驱动与固件/boot_imgs/（6 份，覆盖各内核 release）
 #   生成原理与注意事项见 ghostlock-越狱工具/README.md
 #
 # 前提：手机已 root（KSU 管理器 APK 已安装并授权）—— ghostlock 注入时要拿
@@ -38,20 +38,7 @@ adb_() { timeout 120 adb -s "$DEV" "$@"; }
 run()  { if [ "$DRY" = 1 ]; then echo "  [dry] $*"; else eval "$*"; fi; }
 
 echo "设备: $DEV"
-
-# ---------- 确保 GhostLock 官方二进制就位（不随仓库分发，按需拉取）----------
-if [ ! -x "$KIT/ghostlock" ] || [ ! -x "$KIT/ghostlock-extract-linux-x86_64" ]; then
-  if [ "$DRY" = 1 ]; then
-    echo "⚠️  GhostLock 二进制未就位（--dry-run 不下载）—— 正式执行前请先跑："
-    echo "      ./fetch-ghostlock.sh"
-  else
-    echo "GhostLock 二进制未就位，先从官方 release 拉取 ..."
-    bash "$HERE/fetch-ghostlock.sh" || { echo "✗ fetch-ghostlock.sh 失败"; exit 2; }
-  fi
-fi
-if [ "$DRY" = 0 ]; then
-  [ -x "$KIT/ghostlock" ] || { echo "✗ 缺 ghostlock CLI：$KIT/ghostlock（先跑 ./fetch-ghostlock.sh）"; exit 2; }
-fi
+[ -x "$KIT/ghostlock" ] || { echo "✗ 缺 ghostlock CLI：$KIT/ghostlock"; exit 2; }
 
 # ---------- 设备内核 release（决定用哪份 profile）----------
 KREL="$(adb_ shell uname -r 2>/dev/null | tr -d '\r\n')"
@@ -94,7 +81,7 @@ elif [ -f "$DEVBAK/profile.bin" ]; then
   echo "    若它绑的内核与设备不符，CLI 会直接拒绝 —— 请改用 UV_BOOTIMG 现场生成。"
 else
   echo "✗ 找不到可用于本内核（$KREL）的 profile"
-  echo "  → 取对应 ROM 的 boot.img（本地副本在 <EXTERNAL>/厂商驱动与固件/boot_imgs/），然后："
+  echo "  → 取对应 ROM 的 boot.img（本地副本在 05-逆向脚本与产物/厂商驱动与固件/boot_imgs/），然后："
   echo "      UV_BOOTIMG=<boot.img> $0"
   echo "  原理见 ghostlock-越狱工具/README.md"
   exit 2

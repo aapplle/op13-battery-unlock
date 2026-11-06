@@ -2,11 +2,11 @@
 
 - 取证日期：2026-10-05
 - 实机：`<SERIAL>`，**PJZ110_16.0.5.701(CN01) / Android 16 / kernel 6.6.89-android15-8**
-- 主证物：`<EXTERNAL>/厂商驱动与固件/versions/coloros16.0.5.701/oplus_chg_v2.ko`
+- 主证物：`05-逆向脚本与产物/厂商驱动与固件/versions/coloros16.0.5.701/oplus_chg_v2.ko`
   （**与实机版本一一对应**，9,693,776 B）
 - 复核证物：`versions/coloros17.0.0.100/oplus_chg_v2.ko`（结论完全一致，结构体偏移差 `-0x30`）
 - 手段：**只读**。反汇编 `/usr/lib/llvm-18/bin/llvm-objdump`；自写 BTF 解析器
-  `逆向脚本与产物/逆向脚本/btf_dump.py`（本 ko 的 `.BTF` 是 **split BTF**，实测 base 串表长
+  `05-逆向脚本与产物/逆向脚本/btf_dump.py`（本 ko 的 `.BTF` 是 **split BTF**，实测 base 串表长
   `0x261376`，据此才能解出字段名）；DTB 用 `dtc`；实机 `adb exec-out su -c "cat ..."`。
 - **未对设备做任何写操作**（不改 sysfs、不装模块、不重启）。所有实机数值均为 `cat` 采样。
 
@@ -216,7 +216,7 @@ oplus,virtual_gauge {
 
 ### 4.3 ★ 纠正 AUDIT §3b.2 的说法
 
-`文档/AUDIT-uv2800-v11-独立审计.md` §3b.2 记「5920 的成因由用户确认为『电量计 fcc 读不到时的设计容量兜底』」。
+`../../docs/证据/AUDIT-uv2800-v11-独立审计.md` §3b.2 记「5920 的成因由用户确认为『电量计 fcc 读不到时的设计容量兜底』」。
 **该归因不成立**：
 
 | 情形 | `oplus_gauge_get_batt_capacity_mah` 的返回 |
@@ -279,7 +279,7 @@ bq27541_get_battery_fcc(chip) @0xb8ad8
 ### 6.1 模块写的是哪一处
 
 模块 kprobe 挂在 `oplus_fg_set_deep_term_volt` / `oplus_fg_get_deep_term_volt`
-（见 `内核源码/uv2800.c`，`kp_term_set` / `kp_term_get` / `kp_term_entry`）。
+（见 `02-当前最新构建/内核源码/uv2800.c`，`kp_term_set` / `kp_term_get` / `kp_term_entry`）。
 实机 `/sys/module/uv2800/parameters/`：`adsp_read=2540, uv_adsp_mv=2540, uv_target_mv=2800`；
 dmesg：`OPLUS_CHG[ADSP](oplus_fg_set_deep_term_volt): rc=0, volt = 2540`。
 
@@ -356,12 +356,12 @@ min(A + F·S/100, 5920)  的取值跨过 5920 → 显示从 ② 跳到 ③
 
 - **不需要、也不应该**由模块去"锁定/忽略" `battery_fcc`：它是纯显示节点，
   锁它既无收益，又要往内核塞额外 hook（增加 kCFI/版本适配风险）。
-- **验证解容效果时不要用 `battery_fcc`**。改用（原 `PROJECT-vbat_uv-2800.md` 已由并行会话重命名为 `文档/PROJECT-v11.md`，此处给出地址级理由）：
+- **验证解容效果时不要用 `battery_fcc`**。改用（原 `PROJECT-vbat_uv-2800.md` 已由并行会话重命名为 `docs/PROJECT-v11.md`，此处给出地址级理由）：
   - `dmesg | grep bs_update_data` 的 `fcc`（STRATEGY_BS 口径）；
   - `/sys/class/oplus_chg/battery/battery_log_content`（列名见 `battery_log_head`）里的
     `batt_qmax / batt_soh / batt_rm / batt_fcc` —— 这是**驱动自身缓存值**，不含 §1 的显示补偿；
   - 0% 落点 + 关机电压（真正的效果指标）。
-- **上游文档需要一笔更正**：`文档/PROJECT-v11.md:333` 现写
+- **上游文档需要一笔更正**：`docs/PROJECT-v11.md:333` 现写
   「**不要用 `battery_fcc` 验证效果**。该节点**查询失败时会回退到设计容量**（本机 5920）」——
   **结论（别用它验证）正确，但机制写错了**。本文 §1/§4 已证明：
   (a) 该节点**不**在每次读时实查 IC，读的是 `oplus_configfs_device` 的缓存，只有
@@ -428,7 +428,7 @@ min(A + F·S/100, 5920)  的取值跨过 5920 → 显示从 ② 跳到 ③
 | 结论 | 出处 |
 |---|---|
 | show 函数反汇编 | `versions/coloros16.0.5.701/oplus_chg_v2.ko` @0x42eb8 / 0x42f48 / 0x42f88 / 0x44888 |
-| 结构体字段名 | `逆向脚本与产物/逆向脚本/btf_dump.py`（split BTF，base_str_len=0x261376）→ `oplus_configfs_device` id=368 |
+| 结构体字段名 | `05-逆向脚本与产物/逆向脚本/btf_dump.py`（split BTF，base_str_len=0x261376）→ `oplus_configfs_device` id=368 |
 | 缓存映射 | `oplus_configfs_subscribe_gauge_topic` @0x40de8；`oplus_configfs_gauge_update_work` @0x403f0 |
 | 设计容量 | `oplus_gauge_get_batt_capacity_mah` @0x167c40；`oplus_chg_vg_get_batt_cap` @0x1358c8；`oplus_virtual_gauge_probe` |
 | DT 铭牌 | `dtc -I dtb -O dts work/dtbo_tables/16.0.5.701_dtb0_id0_rev0.dtb` → `silicon_p_770/oplus,batt_capacity_mah = <0x1720>` |

@@ -1,1 +1,1 @@
-<EXTERNAL>/_work/kbuild/uvprobe/uvprobe.o
+<WORKSPACE>/_work/kbuild/uvprobe/uvprobe.o

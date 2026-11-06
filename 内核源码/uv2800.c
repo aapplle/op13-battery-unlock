@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
 // uv2800.c —— 原生 SOC 校准方案（关机电压自定义 + ADSP 自动派生）
 //
 // ============ 功能总览 ============

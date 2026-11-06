@@ -1,6 +1,6 @@
 # RE-C：OPlus 驱动 "深度放电计数"（deep_dischg_counts）语义逆向
 
-- 目标文件：`<EXTERNAL>/厂商驱动与固件/versions/coloros16.0.5.701/oplus_chg_v2.ko`
+- 目标文件：`05-逆向脚本与产物/厂商驱动与固件/versions/coloros16.0.5.701/oplus_chg_v2.ko`
   （md5 `c6fedbc820fac7c6b9c3593b4020b215`，aarch64，内核 6.6.89）
 - 设备：OnePlus 13 (PJZ110)，ROM C16.0.5.701，`CONFIG_HZ=250`
 - 方法：`llvm-objdump -d -r`（读重定位解析 bl/adrp）+ 模块 `.BTF` 与真机 `/sys/kernel/btf/vmlinux` 拼接后的 BTF 类型还原 +

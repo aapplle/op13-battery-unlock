@@ -11,7 +11,7 @@ v1 的问题（v2 修复）：
   3) 缺"误杀哨兵"：合法但曾被 v0_order 误拒的真实厂商表。
 
 v2 做法：
-  · 基线 = 真机活 DT 语料（<EXTERNAL>/回归检查/corpora/PJZ110_16.0.5.701_C16a_dtb0），
+  · 基线 = 真机活 DT 语料（_regress_check/corpora/PJZ110_16.0.5.701_C16a_dtb0），
     完整 6 region x 4 temp 网格，保证路径真实存在、基线值 = 真机实测 3250。
   · 缺陷统一注入到【标准调用命中的那张表】= strategy_ratio_range_mid/strategy_temp_normal。
   · 新增 v0drop_ok 哨兵：真实厂商合法 v0 回落表，必须【通过】（守护已删除的 v0_order 不被重新引入）。
@@ -19,13 +19,13 @@ v2 做法：
 """
 import os, json, shutil, struct
 
-HERE = os.path.dirname(os.path.abspath(__file__))     # 自动化测试矩阵/dt_inject
+HERE = os.path.dirname(os.path.abspath(__file__))     # 03-自动化测试矩阵/dt_inject
 ROM  = os.path.dirname(os.path.dirname(HERE))         # 仓库根
 # 基线优先用【自包含副本】（随本目录一起携带）；缺失时回退到提取语料目录。
-# 自包含是为了让本测试不依赖临时目录 <EXTERNAL>/回归检查/（那是取证会话的工作区，可能被清理）。
+# 自包含是为了让本测试不依赖临时目录 _regress_check/（那是取证会话的工作区，可能被清理）。
 BASE_CANDIDATES = [
     os.path.join(HERE, "base/silicon_p_770/ddrc_strategy"),
-    os.path.join(ROM, "<EXTERNAL>/回归检查/corpora/PJZ110_16.0.5.701_C16a_dtb0/silicon_p_770/ddrc_strategy"),
+    os.path.join(ROM, "_regress_check/corpora/PJZ110_16.0.5.701_C16a_dtb0/silicon_p_770/ddrc_strategy"),
 ]
 BASE = next((x for x in BASE_CANDIDATES if os.path.isdir(x)), BASE_CANDIDATES[0])
 ROOT = os.path.join(HERE, "dtgen")

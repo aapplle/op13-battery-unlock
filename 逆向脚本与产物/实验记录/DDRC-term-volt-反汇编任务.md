@@ -26,7 +26,7 @@
 ## 2. 已知事实（实测）
 
 - 设备：OnePlus 13 (PJZ110)，ROM `PJZ110_16.0.5.701(CN01)`，内核 `6.6.89-android15-8-g7e1f3c083cc6-abogki467167594-4k`
-- 驱动：`<EXTERNAL>/厂商驱动与固件/versions/coloros16.0.5.701/oplus_chg_v2.ko`
+- 驱动：`<WORKSPACE>/05-逆向脚本与产物/厂商驱动与固件/versions/coloros16.0.5.701/oplus_chg_v2.ko`
   （md5 `c6fedbc820fac7c6b9c3593b4020b215`，9.7 MB，**符号表完整，静态函数有名字**）
 - 电量计 IC：`silicon_p_770`（battery_type）。相关 sysfs 实测：
   - `deep_dischg_counts` = 1758

@@ -1,5 +1,7 @@
 # dt_inject —— uv_dt_orig() 失败注入语料与断言测试
 
+> **性质：操作说明（权威，随工具维护）** —— 可选组 TD 的测试资产说明。
+
 > 2026-10-05 重建。针对 log.sh 中的 uv_dt_orig()（按厂商语义推算原厂电量计终止电压）。
 
 ## 为什么重建（v1 的"假绿"）
@@ -18,21 +20,21 @@ v1 另有两个问题：基线表是手造的非真实数据；缺"误杀哨兵"
 
 | 方面 | v2 做法 |
 |---|---|
-| **基线** | 直接复制**真机活 DT 语料** <EXTERNAL>/回归检查/corpora/PJZ110_16.0.5.701_C16a_dtb0/silicon_p_770/，完整 6 region × 4 temp 网格，基线值 = 真机实测 3250 |
+| **基线** | 直接复制**真机活 DT 语料** _regress_check/corpora/PJZ110_16.0.5.701_C16a_dtb0/silicon_p_770/，完整 6 region × 4 temp 网格，基线值 = 真机实测 3250 |
 | **缺陷注入点** | 统一注入到**标准调用命中的那张表** strategy_ratio_range_mid/strategy_temp_normal，保证用例真的走到目标检查 |
 | **哨兵** | v0drop_ok：真实厂商**合法 v0 回落**表（行 0 基准 3100 → 行 1 3000），**必须通过** |
 | **断言** | run_cases.py 逐例断言预期值/预期失败原因，不符即 FAIL 并非零退出 |
 
 ## 用法
 
-    cd .
-    python3 自动化测试矩阵/dt_inject/gen_dt.py             # 重建语料（会清空 dtgen/）
-    python3 自动化测试矩阵/dt_inject/run_cases.py          # 跑全部并断言
-    python3 自动化测试矩阵/dt_inject/run_cases.py valid rr4   # 只跑指定用例
+    cd <WORKSPACE>
+    python3 03-自动化测试矩阵/dt_inject/gen_dt.py             # 重建语料（会清空 dtgen/）
+    python3 03-自动化测试矩阵/dt_inject/run_cases.py          # 跑全部并断言
+    python3 03-自动化测试矩阵/dt_inject/run_cases.py valid rr4   # 只跑指定用例
 
     # 哨兵自测：把已删除的 v0_order 注回副本，确认哨兵能抓到回归
-    python3 自动化测试矩阵/dt_inject/mk_v0order_variant.py
-    UV_DT_LOG=/tmp/log_with_v0order.sh python3 自动化测试矩阵/dt_inject/run_cases.py v0drop_ok
+    python3 03-自动化测试矩阵/dt_inject/mk_v0order_variant.py
+    UV_DT_LOG=/tmp/log_with_v0order.sh python3 03-自动化测试矩阵/dt_inject/run_cases.py v0drop_ok
     # 预期：v0drop_ok FAIL（说明哨兵有效）
 
 退出码：0 = 全部符合预期；1 = 有用例未达预期。

@@ -4,7 +4,7 @@
 > （`06-修复候选-uv_dt_orig-v12/log_v12.sh` 的 `uv_dt_orig()`）
 >
 > ⚠️ **[2026-10-05 溯源说明]** 该候选目录**已删除**（修复早已并入主线，且其中的 `log_v12.sh` 是比主线更旧的变体，
-> 长期造成误导）。本文提到的"推 `log_v12.sh` 到真机"现在就等价于推 **`模块源目录/log.sh`**（主线）。
+> 长期造成误导）。本文提到的"推 `log_v12.sh` 到真机"现在就等价于推 **`02-当前最新构建/模块源目录/log.sh`**（主线）。
 > 本文其余内容为当时的取证记录，未作改写。
 > 拿**厂商日志分区里的原始样本**做统计级验证，判定它是否"准确"、适用边界在哪。
 >
@@ -233,7 +233,7 @@ row k   = max{ i : max(0, row[i].f0 − count_cali) ≤ cc }  （含等号；无
 
 - 真机当前输入：`counts=1758, cc=344, count_cali=0, temp=321(32.1°C)`
   → region=3(mid)、index_t=2(normal)、k=2 → `row2.vbat1 = 3250`；真机日志同刻 `ddrc_status [3250, …] [0, 344, 1758, 51, 0]` ✅
-- 把 `06-修复候选-uv_dt_orig-v12/log_v12.sh` 推到真机，用其官方测试钩子（**注：该目录已删，等价做法改用主线 `模块源目录/log.sh`**）
+- 把 `06-修复候选-uv_dt_orig-v12/log_v12.sh` 推到真机，用其官方测试钩子（**注：该目录已删，等价做法改用主线 `02-当前最新构建/模块源目录/log.sh`**）
   `UV_T_CNT/UV_T_CC/UV_T_CALI/UV_T_TEMP` 跑 19 组代表性输入（覆盖 3060/3150/3250 三档 + 边界），
   与 Python 复刻逐一对照：**19 / 19 完全一致**（`work/xcheck_out.txt` vs `work/xcheck_py.tsv`）。
 
@@ -410,10 +410,10 @@ S015：`tbat@@350`（35.0 °C），日志 `temp_p@@3`（warm），而按 `≤ �
 
 ---
 
-## 8. 复现（脚本全部在 `逆向脚本与产物/逆向脚本/`）
+## 8. 复现（脚本全部在 `05-逆向脚本与产物/逆向脚本/`）
 
 ```bash
-cd .
+cd <WORKSPACE>
 
 # 0) 真机 DT（只读）
 adb shell 'su -c "tar -C /sys/firmware/devicetree/base/soc/oplus,mms_gauge -cf - ."' > _dt_dump/ddrc.tar
@@ -429,21 +429,21 @@ adb shell "su -c 'tar -C /mnt/vendor/oplusreserve -cf - update_engine_log recove
   > work/vendorlogs/oplusreserve_live.tar && tar -xf work/vendorlogs/oplusreserve_live.tar -C work/vendorlogs
 
 # 2) ROM dtbo 表提取（5 个 ROM × 6 个 DTB → work/dtbo_tables/tables.json）
-python3 逆向脚本与产物/逆向脚本/fcc_verify_dtbo_tables.py
-python3 逆向脚本与产物/逆向脚本/fcc_verify_rom_table_match.py   # 与真机表逐格比对
+python3 05-逆向脚本与产物/逆向脚本/fcc_verify_dtbo_tables.py
+python3 05-逆向脚本与产物/逆向脚本/fcc_verify_rom_table_match.py   # 与真机表逐格比对
 
 # 3) 抽取全部 DDRC 记录（84 个文件，含 gz 流式解压）→ work/samples_raw.json
-python3 逆向脚本与产物/逆向脚本/fcc_verify_extract.py
+python3 05-逆向脚本与产物/逆向脚本/fcc_verify_extract.py
 
 # 4) 重算 + 比对 → work/samples_cmp.json + RE-F-samples.csv
-python3 逆向脚本与产物/逆向脚本/fcc_verify_compare.py
+python3 05-逆向脚本与产物/逆向脚本/fcc_verify_compare.py
 
 # 5) 统计（含 shell/python 等价性）
-python3 逆向脚本与产物/逆向脚本/fcc_verify_xcheck_shell.py
-adb push 模块源目录/log.sh /data/local/tmp/log_v12.sh   # 原用候选目录，2026-10-05 起改用主线
+python3 05-逆向脚本与产物/逆向脚本/fcc_verify_xcheck_shell.py
+adb push 02-当前最新构建/模块源目录/log.sh /data/local/tmp/log_v12.sh   # 原用候选目录，2026-10-05 起改用主线
 adb push work/xcheck.sh /data/local/tmp/xcheck.sh
 adb shell "su -c 'sh /data/local/tmp/xcheck.sh'" > work/xcheck_out.txt
-python3 逆向脚本与产物/逆向脚本/fcc_verify_stats.py
+python3 05-逆向脚本与产物/逆向脚本/fcc_verify_stats.py
 ```
 
 | 脚本 | 作用 |

@@ -1,18 +1,18 @@
 # 手机测试环境准备（双清 / 换 ROM / 换内核后必看）
 
+> **性质：操作说明（权威，随工具维护）** —— 双清/换 ROM 后的环境恢复。
+
 > 双清会清掉 `/data` 与 `/sdcard`。这里放两样东西：
 > ① 矩阵跑起来**依赖的手机文件**（越狱 CLI 与 profile）；② **越狱工具与各内核 profile**（ghostlock 不支持新内核时自己生成）。
->
-> ⚠️ **GhostLock 的二进制与 APK 不随仓库分发**（上游 Apache-2.0）—— 用 [`fetch-ghostlock.sh`](fetch-ghostlock.sh) 按需拉取并校验官方 SHA256。
 
 ## 一、目录内容
 
 | 路径 | 是什么 |
 |---|---|
-| `ghostlock-越狱工具/` | `tools/glk1_gen.py`（profile 生成器）、`tools/decode_glk1.py`、`profiles/`（各内核 GLK1）；**CLI / 提取器 / APK 不随仓库分发**，由 `fetch-ghostlock.sh` 按需拉取。详见 [其 README](ghostlock-越狱工具/README.md) |
+| `ghostlock-越狱工具/` | 越狱 CLI、**官方提取器**、官方 App、`tools/glk1_gen.py`（profile 生成器）、`tools/decode_glk1.py`、`profiles/`（各内核 GLK1）。详见 [其 README](ghostlock-越狱工具/README.md) |
+| `设备文件/data/local/tmp/ghostlock` | 设备侧快照（与工具目录里的 CLI **逐字节相同**，仅供对照） |
 | `设备文件/data/local/tmp/profile.bin` | 设备侧快照（**绑 6.6.30**；换内核后无效，见下） |
-| `fetch-ghostlock.sh` | 从官方 release 下载 GhostLock 二进制/APK 并校验官方 SHA256 |
-| `恢复到手机.sh` | 一键恢复：推送 CLI + **按设备 `uname -r` 自动挑 profile** + 校验（缺二进制时自动调 `fetch-ghostlock.sh`） |
+| `恢复到手机.sh` | 一键恢复：推送 CLI + **按设备 `uname -r` 自动挑 profile** + 校验 |
 
 ## 二、为什么要有 profile 生成器
 
@@ -28,15 +28,14 @@
 [ghostlock-越狱工具/README.md](ghostlock-越狱工具/README.md)。
 
 > ⚠️ **适用范围（重要）**：这套方法解决的是"**官方未收录该内核**"，**不是**"官方已封堵"。
-> **C17（ColorOS 17 / 6.6.118）的越狱注入没有实测**；GhostLock 的注入方式在 C17 上不可用，
-> 给 C17 生成 profile 也无法用本套流程越狱。矩阵里 C17 的 T4.1/T4.2 记为"未实测"的 SKIP
-> （见 [兼容性总表](../兼容性总表.md) 的 C17 late-load 格：**⬜ 未实测**）。
+> **C17（ColorOS 17 / 6.6.118）上 ghostlock 的越狱注入方式已被修复，无法越狱** ——
+> 给 C17 生成 profile 也**不能**让越狱成功。因此矩阵里 C17 的 T4.1/T4.2 永远是
+> "路线不适用"的 SKIP（见 [兼容性总表](../兼容性总表.md) 的 C17 late-load 格：**⛔ 不适用**）。
 
 ## 三、用法
 
 ```sh
-cd 自动化测试矩阵/手机测试环境准备
-./fetch-ghostlock.sh             # 首次：拉取 GhostLock 官方二进制/APK（校验 SHA256）
+cd 03-自动化测试矩阵/手机测试环境准备
 ./恢复到手机.sh --dry-run        # 先看要做什么（不碰设备）
 ./恢复到手机.sh                  # 恢复：自动挑本内核的 profile，推送并互算 md5 校验
 
@@ -55,7 +54,7 @@ UV_PROFILE=/path/to/x.bin ./恢复到手机.sh
 
 ## 四、`boot.img` 从哪来
 
-- **本地已抽好的 6 份**：`<EXTERNAL>/厂商驱动与固件/boot_imgs/`（清单 `MANIFEST-boot_imgs.txt`，
+- **本地已抽好的 6 份**：`05-逆向脚本与产物/厂商驱动与固件/boot_imgs/`（清单 `MANIFEST-boot_imgs.txt`，
   覆盖 6.6.30 / 6.6.66 / 6.6.89 / 6.6.118 各构建）；
 - 必须选 **`uname -r` 完全一致**的那份（提取器/CLI 都按 release 校验）；
 - ROM 整包已从工作区删除以腾空间（原始压缩包由作者保存在 NTFS D 盘），需要别的内核时从那取。
@@ -67,7 +66,7 @@ UV_PROFILE=/path/to/x.bin ./恢复到手机.sh
    （⚠️ 不能用别的 ROM 版本打出来的 patch 镜像）
 3. `su -c id` 确认 `uid=0`；
 4. `./恢复到手机.sh`（本内核没有 profile 时加 `UV_BOOTIMG=...`）；
-5. `cd 自动化测试矩阵 && ./run.sh` —— 自动安装被测模块、自动判定启动路线。
+5. `cd 03-自动化测试矩阵 && ./run.sh` —— 自动安装被测模块、自动判定启动路线。
 
 **前提**：KSU 管理器 APK 已安装并授权 —— ghostlock 注入时要取 APK 里的
 `lib/arm64/libksud.so` 当 ksud（脚本会先用 `pm list packages` 检测，缺了会警告）。
@@ -90,13 +89,3 @@ UV_PROFILE=/path/to/x.bin ./恢复到手机.sh
 | `/data/adb/ksud`、`/data/adb/uv2800_backup/`、模块目录 | KSU 开机自建 + `run.sh` 的 `ensure_module` 自动安装/重建 |
 | `/data/local/tmp/uvtest/**` | `run.sh` 每次运行自动推送 |
 | 刷机素材（KSU APK、原厂/patched `init_boot`、Zygisk/LSPosed、调试日志） | 按作者要求不保留 |
-
-## 八、第三方与许可证
-
-| 组件 | 来源 | 许可证 | 分发方式 |
-|---|---|---|---|
-| GhostLock（CLI / 提取器 / App） | [YuKongA/ghostlock-app](https://github.com/YuKongA/ghostlock-app)，release `pre-release` = v1.2 (549)，commit `ff9991b` | **Apache-2.0** | **不随仓库分发**；`fetch-ghostlock.sh` 按需拉取并校验官方 SHA256 |
-| `ghostlock-越狱工具/tools/glk1_gen.py`、`decode_glk1.py` | 本项目原创 | 随本仓库 | 随仓库分发 |
-| `ghostlock-越狱工具/profiles/*.bin`、`*.conf` | 本项目生成/整理（部分基于官方 profile 包） | — | 随仓库（KB 级配置数据） |
-
-完整声明（含上游自身的 3 个来源项目）见仓库根 [`THIRD-PARTY-NOTICES.md`](../../THIRD-PARTY-NOTICES.md)。
