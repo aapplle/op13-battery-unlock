@@ -218,7 +218,8 @@ _uv_fcc_read() {
             read _cv _cs _ct < "$BK/.fcc_raw" 2>/dev/null
             case "$_cv" in ''|*[!0-9]*) _cv=NA ;; esac
             case "$_ct" in ''|*[!0-9]*) _ct=0 ;; esac
-            if [ "$_cv" != NA ] && [ $((_now - _ct)) -lt 60 ] 2>/dev/null; then
+            _age=$((_now - _ct))
+            if [ "$_cv" != NA ] && [ "$_now" -gt 0 ] 2>/dev/null && [ "$_age" -ge 0 ] 2>/dev/null && [ "$_age" -lt 60 ] 2>/dev/null; then
                 _uvfr_v=$_cv
                 _uvfr_src=$_cs
                 [ -n "$_uvfr_src" ] || _uvfr_src=mms
