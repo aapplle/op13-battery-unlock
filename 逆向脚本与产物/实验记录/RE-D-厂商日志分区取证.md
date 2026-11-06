@@ -642,10 +642,10 @@ EFI_GetBootToHlosThd param 3350 -100 50 50 50 50 3000 3400 3150 0 0 3400 3050
 
 ```bash
 # ext4 元数据（创建/最后写入时间、UUID）
-dumpe2fs -h <EXTERNAL>/oplusreserve2.img
+dumpe2fs -h <WORKSPACE>/oplusreserve2.img
 # 整盘递归导出（只读）
 mkdir -p /tmp/oxlogs2/x2
-debugfs -R "rdump / /tmp/oxlogs2/x2" <EXTERNAL>/oplusreserve2.img
+debugfs -R "rdump / /tmp/oxlogs2/x2" <WORKSPACE>/oplusreserve2.img
 # 裸区按槽分析（内核版本 / counts / cc / 四元组 / 日期行）
 <HOME>/reverse/venv/bin/python3 /tmp/oxlogs2/slots.py
 <HOME>/reverse/venv/bin/python3 /tmp/oxlogs2/align.py

@@ -1,1 +1,1 @@
-savedcmd_<EXTERNAL>/_work/kbuild/uvprobe/modules.order := {   echo <EXTERNAL>/_work/kbuild/uvprobe/uvprobe.o; :; } > <EXTERNAL>/_work/kbuild/uvprobe/modules.order
+savedcmd_<WORKSPACE>/_work/kbuild/uvprobe/modules.order := {   echo <WORKSPACE>/_work/kbuild/uvprobe/uvprobe.o; :; } > <WORKSPACE>/_work/kbuild/uvprobe/modules.order

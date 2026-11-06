@@ -1,8 +1,8 @@
 # RE-B：跨驱动版本比对 —— 3350 vs 3250 能否由驱动版本解释
 
 生成：RE-B 子代理（跨版本比对，不做深度逆向）
-输入：`<EXTERNAL>/厂商驱动与固件/versions/*/oplus_chg_v2.ko`（六份）
-方法：pyelftools 取符号表 + capstone 5.0.7 反汇编 + 模块重定位表（SHT_RELA）解析 callee 与被引用字符串；所有结论均由脚本产出，脚本在 `逆向脚本与产物/scripts/re_b_*.py`
+输入：`<WORKSPACE>/05-逆向脚本与产物/厂商驱动与固件/versions/*/oplus_chg_v2.ko`（六份）
+方法：pyelftools 取符号表 + capstone 5.0.7 反汇编 + 模块重定位表（SHT_RELA）解析 callee 与被引用字符串；所有结论均由脚本产出，脚本在 `05-逆向脚本与产物/scripts/re_b_*.py`
 
 ---
 
@@ -249,15 +249,15 @@ C16.0.5.701 新增部分（@0x18c95c 起）：
 
 ```sh
 # 符号表（本报告 §1）
-python3 逆向脚本与产物/scripts/re_b_table.py
+python3 05-逆向脚本与产物/scripts/re_b_table.py
 # 指令级等价性分组（§2）
-python3 逆向脚本与产物/scripts/re_b_equiv.py
+python3 05-逆向脚本与产物/scripts/re_b_equiv.py
 # DT 解析差异（§3.1）
-python3 逆向脚本与产物/scripts/re_b_numdiff.py ddrc_strategy_alloc_by_node coloros15.0.0.861 coloros16.0.5.701
+python3 05-逆向脚本与产物/scripts/re_b_numdiff.py ddrc_strategy_alloc_by_node coloros15.0.0.861 coloros16.0.5.701
 # 表内容否证（§3.2）
-python3 逆向脚本与产物/scripts/re_b_tables.py
+python3 05-逆向脚本与产物/scripts/re_b_tables.py
 # 常量扫描（§3.2/§4）
-python3 逆向脚本与产物/scripts/re_b_const.py
+python3 05-逆向脚本与产物/scripts/re_b_const.py
 ```
 
 注：这些 .ko 的**所有节 VMA 均为 0**（`llvm-objdump -h` 可复核），符号 `st_value` 是节内偏移；因此"地址"跨版本不可直接比较，只能按符号名定位后再比指令。本报告的跨版本比较一律基于**指令文本**而非地址。
