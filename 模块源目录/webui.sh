@@ -82,38 +82,44 @@ cmd_status() {
     _uvs_removing=0
     [ -f "$MOD/remove" ] && _uvs_removing=1
 
-    _uvs_skip=$(_uv_yesno "$BK/skip")
-    _uvs_nrs=$(_uv_yesno "$BK/no_real_soc")
-    _uvs_np=$(_uv_yesno "$BK/no_policy")
-    _uvs_naw=$(_uv_yesno "$BK/no_adsp_write")
-    _uvs_bad=$(_uv_yesno "$BK/adsp_orig.bad")
-    _uvs_applied=$(_uv_yesno "$BK/applied")
+    [ -e "$BK/skip" ] && _uvs_skip=yes || _uvs_skip=no
+    [ -e "$BK/no_real_soc" ] && _uvs_nrs=yes || _uvs_nrs=no
+    [ -e "$BK/no_policy" ] && _uvs_np=yes || _uvs_np=no
+    [ -e "$BK/no_adsp_write" ] && _uvs_naw=yes || _uvs_naw=no
+    [ -e "$BK/adsp_orig.bad" ] && _uvs_bad=yes || _uvs_bad=no
+    [ -e "$BK/applied" ] && _uvs_applied=yes || _uvs_applied=no
 
-    _uvs_tfile=$(_uv_num "$BK/target_mv")
-    _uvs_pt=$(_uv_num "$P/uv_target_mv")
-    _uvs_pa=$(_uv_num "$P/uv_adsp_mv")
-    _uvs_adsp=$(_uv_read_adsp)
-    _uvs_vbat=$(_uv_num "$VBAT")
-    _uvs_cap=$(_uv_num "$CAP")
-    _uvs_chip=$(_uv_num "$CHIP")
-    _uvs_volt=$(_uv_voltage_mv)
-    _uvs_temp=$(_uv_temp_c)
-    _uvs_counts=$(_uv_num "$DDRC")
-    _uvs_cc=$(_uv_num "$CC")
-    _uvs_rm=$(_uv_num "$RM")
+    _uv_num_val "$BK/target_mv"; _uvs_tfile=$_UV_RET
+    _uv_num_val "$P/uv_target_mv"; _uvs_pt=$_UV_RET
+    _uv_num_val "$P/uv_adsp_mv"; _uvs_pa=$_UV_RET
+    _uv_read_adsp_val; _uvs_adsp=$_UV_RET
+    _uv_num_val "$VBAT"; _uvs_vbat=$_UV_RET
+    _uv_num_val "$CAP"; _uvs_cap=$_UV_RET
+    _uv_num_val "$CHIP"; _uvs_chip=$_UV_RET
+    _uv_voltage_mv_val; _uvs_volt=$_UV_RET
+    _uv_temp_c_val; _uvs_temp=$_UV_RET
+    _uv_num_val "$DDRC"; _uvs_counts=$_UV_RET
+    _uv_num_val "$CC"; _uvs_cc=$_UV_RET
+    _uv_num_val "$RM"; _uvs_rm=$_UV_RET
     _uv_fcc_read
     _uvs_fcc=$_uvfr_v
     _uvs_fcc_src=$_uvfr_src
-    _uvs_cali=$(_uv_num "$CALI")
-    _uvs_orig=$(_uv_num "$BK/adsp_orig.txt")
-    _uvs_state=$(_uv_num "$BK/adsp_state")
-    _uvs_ostate=$(_uv_orig_state)
-    _uvs_resume=$(_uv_num "$P/resume")
+    _uv_num_val "$CALI"; _uvs_cali=$_UV_RET
+    _uv_num_val "$BK/adsp_orig.txt"; _uvs_orig=$_UV_RET
+    _uv_num_val "$BK/adsp_state"; _uvs_state=$_UV_RET
+    _uv_orig_state_val; _uvs_ostate=$_UV_RET
+    _uv_num_val "$P/resume"; _uvs_resume=$_UV_RET
     _uvs_bl=$(_uv_bind_layers)
-    _uvs_bg=$(_uv_bind_global)
-    _uvs_route=$(_uv_route_log)
-    _uvs_profile=$(_uv_profile)
-    _uvs_lines=$(_uv_log_lines)
+    if _uv_ns_diff && command -v nsenter >/dev/null 2>&1; then
+        _uvs_bg=$(nsenter -t 1 -m -- grep -c chip_soc /proc/self/mountinfo 2>/dev/null || true)
+        case "$_uvs_bg" in ''|*[!0-9]*) _uvs_bg=NA ;; esac
+    else
+        _uvs_bg=$_uvs_bl
+    fi
+    _uv_scan_log_meta
+    _uvs_route=$_UV_LOG_ROUTE
+    _uv_profile_val "$_UV_LOG_PROFILE"; _uvs_profile=$_UV_RET
+    _uvs_lines=$_UV_LOG_LINES
     _uv_lock_state
 
     if [ "$_uvs_loaded" = 0 ]; then
@@ -201,9 +207,18 @@ cmd_status() {
         if [ "$_uvs_cap" != NA ] && [ "$_uvs_cap" -lt 30 ] 2>/dev/null; then _uvs_low=1; fi
     fi
 
-    _uvs_ver=$(sed -n 's/^version=//p' "$MOD/module.prop" 2>/dev/null | head -1 | tr -d '[:space:]')
+    _uvs_ver=NA
+    _uvs_vcode=NA
+    if [ -r "$MOD/module.prop" ]; then
+        while IFS= read -r _uvmp_line || [ -n "$_uvmp_line" ]; do
+            _uvmp_line=${_uvmp_line%$_UV_CR}
+            case "$_uvmp_line" in
+                version=*) [ "$_uvs_ver" = NA ] && _uvs_ver=${_uvmp_line#version=} ;;
+                versionCode=*) [ "$_uvs_vcode" = NA ] && _uvs_vcode=${_uvmp_line#versionCode=} ;;
+            esac
+        done < "$MOD/module.prop"
+    fi
     [ -n "$_uvs_ver" ] || _uvs_ver=NA
-    _uvs_vcode=$(sed -n 's/^versionCode=//p' "$MOD/module.prop" 2>/dev/null | head -1 | tr -d '[:space:]')
     [ -n "$_uvs_vcode" ] || _uvs_vcode=NA
 
     _uvs_enabled=1
@@ -315,10 +330,10 @@ cmd_write_adsp() {
     if [ "$_uvw_read" = "$_uvw_v" ]; then
         printf '%s\n' "$_uvw_v" > "$BK/adsp_state" 2>/dev/null
         klog "webui 手动写 ADSP 成功: ${_uvw_v} mV（读回 ${_uvw_read}）"
-        printf 'RESULT=ok\nCODE=ok\nADSP_READ=%s\nVALUE=%s\nRC=%s\n' "$_uvw_read" "$_uvw_v" "$_uvw_rc"
+        printf 'RESULT=ok\nCODE=ok\nADSP_READ=%s\nVALUE=%s\nWRITE_RC=%s\nDETAIL=rc:%s\n' "$_uvw_read" "$_uvw_v" "$_uvw_rc" "$_uvw_rc"
     else
         klog "webui 手动写 ADSP 读回不一致: 写入 ${_uvw_v} / 读回 ${_uvw_read}"
-        printf 'RESULT=warn\nCODE=readback_mismatch\nADSP_READ=%s\nVALUE=%s\nRC=%s\n' "$_uvw_read" "$_uvw_v" "$_uvw_rc"
+        printf 'RESULT=warn\nCODE=readback_mismatch\nADSP_READ=%s\nVALUE=%s\nWRITE_RC=%s\nDETAIL=rc:%s\n' "$_uvw_read" "$_uvw_v" "$_uvw_rc" "$_uvw_rc"
     fi
 }
 
@@ -681,11 +696,25 @@ cmd_run_bg() {
     case "$_uvbg_tag" in
         *[!A-Za-z0-9_-]*|"") printf 'RESULT=fail\nCODE=usage\nDETAIL=run-bg_tag\n'; return 2 ;;
     esac
+    mkdir -p "$BK" 2>/dev/null
+    # 清理先前已完成但未被前端消费的孤儿状态/操作结果文件（保留正在运行中的任务）
+    case "$_uvbg_tag" in
+        status_*|op_*)
+            _uvbg_pfx=${_uvbg_tag%%_*}
+            for _uvbg_old in "$BK/.webui_op.${_uvbg_pfx}_"*.rc; do
+                [ -f "$_uvbg_old" ] || continue
+                _uvbg_base=${_uvbg_old%.rc}
+                [ "$_uvbg_base" = "$BK/.webui_op.$_uvbg_tag" ] && continue
+                rm -f "$_uvbg_old" "$_uvbg_base.out" "$_uvbg_base.out.tmp" "$_uvbg_old.tmp" 2>/dev/null
+            done
+            ;;
+    esac
     _uvbg_out="$BK/.webui_op.$_uvbg_tag.out"
     _uvbg_rc="$BK/.webui_op.$_uvbg_tag.rc"
-    rm -f "$_uvbg_out" "$_uvbg_rc"
-    # 双 fork + setsid 并关闭继承的文件描述符，避免后台子进程阻塞 ksu.exec 调用返回
-    ( ( exec setsid sh -c 'o=$1; r=$2; shift 2; sh "$0" "$@" >"$o" 2>&1; echo $? >"$r.tmp" && mv -f "$r.tmp" "$r"' \
+    rm -f "$_uvbg_out" "$_uvbg_out.tmp" "$_uvbg_rc" "$_uvbg_rc.tmp"
+    # 双 fork + setsid 并关闭继承的文件描述符，避免后台子进程阻塞 ksu.exec 调用返回；
+    # 输出先写 .out.tmp 再原子重命名为 .out，随后原子落盘 .rc，杜绝半截输出。
+    ( ( exec setsid sh -c 'o=$1; r=$2; shift 2; sh "$0" "$@" >"$o.tmp" 2>&1; ec=$?; mv -f "$o.tmp" "$o" 2>/dev/null; echo "$ec" >"$r.tmp" && mv -f "$r.tmp" "$r"' \
         "$MODDIR/webui.sh" "$_uvbg_out" "$_uvbg_rc" "$@" ) \
         </dev/null >/dev/null 2>&1 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&- & ) &
     printf 'RESULT=ok\nCODE=started\n'

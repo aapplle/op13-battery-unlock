@@ -151,10 +151,7 @@ fi
 # 同步内核 hook 强制值为原厂值并确保 hook 处于启用状态
 _P=$(dirname "$PARAM")
 if [ -w "$_P/uv_target_mv" ]; then
-    echo "$TARGET" > "$_P/uv_shutdown_mv" 2>/dev/null
     echo "$TARGET" > "$_P/uv_target_mv"
-    echo "$TARGET" > "$_P/uv_term_mv" 2>/dev/null
-    echo "$TARGET" > "$_P/uv_adsp_mv" 2>/dev/null
     echo 1 > "$_P/resume" 2>/dev/null
     sleep 1
     echo "- hook 强制值 : $TARGET mV（uv_target_mv），resume=$(cat "$_P/resume" 2>/dev/null)，vbat_uv=$(cat "$VBAT" 2>/dev/null)"

@@ -48,12 +48,30 @@ command -v adsp_known >/dev/null 2>&1 || adsp_known() { return 1; }
 
 uv_log_sep "service.sh 开始（KSU_LATE_LOAD=$KSU_LATE_LOAD）"
 
-# 清理可能残留的旧 service.sh 进程，仅保留当前进程
+# 清理可能残留的旧 service.sh 进程，仅保留当前进程及其祖先调用链
 _me=$$
+_anc=" $_me "
+_cur=$_me
+_dep=0
+while [ "$_dep" -lt 8 ]; do
+    _pp=""
+    if [ -r "/proc/$_cur/status" ]; then
+        while IFS= read -r _ln; do
+            case "$_ln" in
+                PPid:*) _pp=${_ln#PPid:}; _pp=${_pp##*[!0-9]}; break ;;
+            esac
+        done < "/proc/$_cur/status"
+    fi
+    case "$_pp" in ''|*[!0-9]*) break ;; esac
+    [ "$_pp" -le 1 ] 2>/dev/null && break
+    _anc="$_anc$_pp "
+    _cur=$_pp
+    _dep=$((_dep+1))
+done
 _n=0
 for _p in /proc/[0-9]*; do
     _pid=${_p#/proc/}
-    [ "$_pid" = "$_me" ] && continue
+    case "$_anc" in *" $_pid "*) continue ;; esac
     case "$_pid" in ""|*[!0-9]*) continue ;; esac
     _c=$(cat "$_p/cmdline" 2>/dev/null | tr "\0" " ")
     case "$_c" in
@@ -128,9 +146,13 @@ if [ "$V_S" -lt 2800 ] 2>/dev/null || [ "$V_S" -gt 3060 ] 2>/dev/null; then
     V_S=$TARGET_MV_DEFAULT
     echo "$V_S" > "$BK/target_mv"
 fi
-TERM_TARGET=$((2 * V_S - 3060))
-[ "$TERM_TARGET" -lt 2000 ] 2>/dev/null && TERM_TARGET=2000
-[ "$TERM_TARGET" -gt 5000 ] 2>/dev/null && TERM_TARGET=5000
+if command -v uv_derive_term_mv >/dev/null 2>&1; then
+    TERM_TARGET=$(uv_derive_term_mv "$V_S")
+else
+    TERM_TARGET=$((2 * V_S - 3060))
+    [ "$TERM_TARGET" -lt 2000 ] 2>/dev/null && TERM_TARGET=2000
+    [ "$TERM_TARGET" -gt 5000 ] 2>/dev/null && TERM_TARGET=5000
+fi
 ADSP_TARGET=$TERM_TARGET
 klog "关机电压 V_s=${V_S} mV，QBG 学习 term=${ADSP_TARGET} mV（公式派生）"
 
@@ -151,17 +173,14 @@ elif [ -f "$BK/skip" ]; then
         fi
     fi
     if [ -n "$_orig" ] && [ "$_orig" -ge 3000 ] 2>/dev/null && [ "$_orig" -le 5000 ] 2>/dev/null; then
-        if [ "$(cat "$P/uv_shutdown_mv" 2>/dev/null)" != "$_orig" ]; then
-            echo "$_orig" > "$P/uv_shutdown_mv" 2>/dev/null
+        if [ "$(cat "$P/uv_target_mv" 2>/dev/null)" != "$_orig" ]; then
+            # 写 uv_target_mv 会同步派生 uv_term_mv 并重放 votable override
             echo "$_orig" > "$P/uv_target_mv" 2>/dev/null
-            echo "$_orig" > "$P/uv_term_mv" 2>/dev/null
-            echo "$_orig" > "$P/uv_adsp_mv" 2>/dev/null
             sleep 1
             klog "已把内核 hook 强制值设为原厂 ${_orig} mV，vbat_uv=$(cat /sys/class/oplus_chg/battery/vbat_uv 2>/dev/null)"
         fi
         _cur=$(echo 1 > "$P/adsp_read" 2>/dev/null; cat "$P/adsp_read" 2>/dev/null)
         if [ -n "$_cur" ] && [ "$_cur" -gt 2000 ] 2>/dev/null; then
-            echo "$_orig" > "$P/uv_adsp_mv" 2>/dev/null
             if [ "$_cur" != "$_orig" ]; then
                 echo "$_orig" > "$P/adsp_write" 2>/dev/null
                 _rb=$(echo 1 > "$P/adsp_read" 2>/dev/null; cat "$P/adsp_read" 2>/dev/null)
@@ -184,13 +203,10 @@ elif [ -f "$BK/skip" ]; then
     klog "若要重新自动解耦，请执行：rm $BK/skip 后重启"
 elif [ -w "$P/adsp_read" ]; then
     # 解耦模式：更新关机电压与学习终止电压参数，并将终止电压写入 ADSP
-    if [ "$(cat "$P/uv_shutdown_mv" 2>/dev/null)" != "$V_S" ]; then
-        echo "$V_S" > "$P/uv_shutdown_mv" 2>/dev/null
+    if [ "$(cat "$P/uv_target_mv" 2>/dev/null)" != "$V_S" ]; then
         echo "$V_S" > "$P/uv_target_mv" 2>/dev/null
         klog "已把 shutdown hook 强制值设为 ${V_S} mV（解耦模式）"
     fi
-    echo "$ADSP_TARGET" > "$P/uv_term_mv" 2>/dev/null
-    echo "$ADSP_TARGET" > "$P/uv_adsp_mv" 2>/dev/null
 
     # 轮询等待 uv_dev 就绪（最长 10 秒），期间若出现 skip 标记则立即中止
     i=0; cur=""; _probe=ok
@@ -221,8 +237,6 @@ elif [ -w "$P/adsp_read" ]; then
     if [ -n "$cur" ]; then
         if [ "$cur" != "$ADSP_TARGET" ]; then
             backup_orig "$cur"
-            echo "$ADSP_TARGET" > "$P/uv_term_mv" 2>/dev/null
-            echo "$ADSP_TARGET" > "$P/uv_adsp_mv" 2>/dev/null
             echo "$ADSP_TARGET" > "$P/adsp_write"
             _rb=$(echo 1 > "$P/adsp_read" 2>/dev/null; cat "$P/adsp_read" 2>/dev/null)
             klog "电量计终止电压 ${cur} -> ${ADSP_TARGET} mV（读回 ${_rb}，满电状态切换后重算 fcc）"

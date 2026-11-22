@@ -1020,7 +1020,6 @@ footer .theme-note {
   .details summary { color: var(--text); }
   .details .chev { color: #aab1ba; }
   .log-head { color: #8a919a; }
-  .log-box pre { color: #4b5563; }
 
   .cell {
     background: #f7f8fa;

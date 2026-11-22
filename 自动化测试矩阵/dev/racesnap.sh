@@ -22,7 +22,7 @@ for p in /proc/[0-9]*; do
     *uv2800/restore.sh*|*uv2800/action.sh*)  m=$((m+1)) ;;
     *uv2800*)            z=$((z+1)) ;;
   esac
-  st=$(awk '{print $3}' "$p/stat" 2>/dev/null)
+  st=$(sed 's/.*) //' "$p/stat" 2>/dev/null | awk '{print $1}')
   [ "$st" = "Z" ] && zz=$((zz+1))
 done
 echo "svc_procs=$n"

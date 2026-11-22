@@ -20,6 +20,11 @@ _uv_lock() {
         return 0
     fi
     _uvl_pid=$(cat "$LOCK/pid" 2>/dev/null)
+    if [ -z "$_uvl_pid" ]; then
+        # 避免与刚 mkdir 尚未写完 pid 的并发进程撞车，短暂等待后重读一次
+        sleep 1
+        _uvl_pid=$(cat "$LOCK/pid" 2>/dev/null)
+    fi
     _uvl_stale=1
     case "$_uvl_pid" in
         ''|*[!0-9]*) : ;;

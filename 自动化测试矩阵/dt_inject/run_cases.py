@@ -15,9 +15,12 @@
 """
 import os, sys, json, subprocess
 
-HERE = os.path.dirname(os.path.abspath(__file__))     # 03-自动化测试矩阵/dt_inject
+HERE = os.path.dirname(os.path.abspath(__file__))     # 自动化测试矩阵/dt_inject
 ROM  = os.path.dirname(os.path.dirname(HERE))         # 仓库根
-LOG  = os.environ.get("UV_DT_LOG", os.path.join(ROM, "02-当前最新构建/模块源目录/log.sh"))   # 可覆盖：用于哨兵自测
+_DEFAULT_LOG = os.path.join(ROM, "模块源目录/log.sh")
+if not os.path.exists(_DEFAULT_LOG):
+    _DEFAULT_LOG = os.path.join(ROM, "02-当前最新构建/模块源目录/log.sh")
+LOG  = os.environ.get("UV_DT_LOG", _DEFAULT_LOG)      # 可覆盖：用于哨兵自测
 ROOT = os.path.join(HERE, "dtgen")
 MAN  = json.load(open(os.path.join(ROOT, "manifest.json")))
 

@@ -10,6 +10,13 @@
 /内核源码/*.order
 /内核源码/modules.order
 /内核源码/.tmp_versions/
+/编译前置/uvprobe（逆向探针模块）/*.o
+/编译前置/uvprobe（逆向探针模块）/*.cmd
+/编译前置/uvprobe（逆向探针模块）/.*.cmd
+/编译前置/uvprobe（逆向探针模块）/*.mod
+/编译前置/uvprobe（逆向探针模块）/*.mod.c
+/编译前置/uvprobe（逆向探针模块）/Module.symvers
+/编译前置/uvprobe（逆向探针模块）/modules.order
 
 # 测试矩阵运行输出（每次运行重新生成）
 /自动化测试矩阵/results/

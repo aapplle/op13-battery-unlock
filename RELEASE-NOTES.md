@@ -1,84 +1,43 @@
-# 一加 13 解容模块 uv2800 v12 发布说明
+# 一加 13 解容模块 uv2800 v12.1 发布说明
 
-v12（`version=12` / `versionCode=35`）是在 v11 基础上做的一次大版本迭代。如果说 v11 解决的是“越狱模式免插拔”和“设备树原厂值精确复刻”，那么 v12 重点解决的就是**日常交互体验**与**跨版本底层控制的一致性**——这一版加入了完整的原生 KernelSU WebUI，把两项附加功能拆成了可独立持久化的开关，并在内核层补齐了 `votable` 强制覆写与 ColorOS 15 真实 FCC 读取。
-
-下面是自 v11 版本以来的全部主要更新内容：
+`v12.1`（`version=12.1` / `versionCode=36`）是 `v12` 之后的健壮性加固与性能优化版本，聚焦内核安全边界、用户态并发与状态复核准确性、WebUI 轮询性能以及开源仓库自动化自检，核心行为与跨 ColorOS 15 / 16 / 17 兼容性完全延续 `v12`。
 
 ---
 
-## 一、全新原生 KernelSU WebUI，告别手改配置与盲点「执行」
+## 一、内核模块健壮性加固（`uv2800.c` / `uv2800.ko`）
 
-在 v11 里，改关机电压要去手动编辑 `/data/adb/uv2800_backup/target_mv` 并重启，看状态要敲命令查日志，而且管理器卡片外层直接挂着一个「执行（`action.sh`）」按钮，不小心点到就会触发恢复原厂。
-
-v12 新增了一整套原生 WebUI（`模块源目录/webroot/` + `模块源目录/webui.sh`）：
-
-1. **实时状态看板**：
-   打开 WebUI 即可直观看到电量计真实电量（`chip_soc`）、系统显示电量、单芯电压、电池温度、当前关机电压 `V_s`、ADSP 空电点、剩余电量（RM）、电量计真实全充容量（FCC）、循环次数/深放计数、当前匹配的内核 Profile 以及启动路线（`standard` / `late-load`）。界面支持跟随系统深色/浅色模式自动切换。
-2. **在线调压，立即生效**：
-   提供 `2800–3060 mV` 滑块和 `2800` / `2900` / `3000` / `3060` 四个快捷档位。拖动滑块时会实时预览对应派生出的 ADSP 空电点，点击「应用并重跑 service.sh」即可直接写入生效并自动完成读回复核，不再需要每次改完文件都重启手机。
-3. **移除外层「执行」按钮，收口为带安全守卫的「恢复原厂」专区**：
-   原 `action.sh` 已更名为 `restore.sh` 并移出管理器外层按钮。现在恢复原厂统一在 WebUI 的「恢复原厂」卡片中进行：
-   - 执行前自动检查当前电池单芯电压与电量（电压 `< 3300 mV` 或电量 `< 30%` 时触发低电量告警）；
-   - 必须手动勾选「我已知晓：低电量恢复可能让电量计钳位」并通过二次确认弹窗后才会执行，彻底杜绝误触；
-   - 已处于原厂模式时，在上方关机电压卡片点「重新启用并应用」就能一键切回解容状态。
-4. **全异步后台架构，彻底解决 WebView 卡顿与开关回跳**：
-   KernelSU 的同步执行桥在跑耗时脚本（如轮询等待服务或写寄存器）时会阻塞 WebView 主线程。v12 在 `webui.sh` 中通过 `run-bg`（双 fork + `setsid` + 关闭继承的文件描述符 + 临时文件原子重命名生成 `.rc`）将所有状态查询与写操作放到后台独立运行，配合前端的乐观状态更新与请求序号（`statusSeq`）作废机制，点击操作和定时轮询全程丝滑无卡顿。
-5. **内置高级诊断与日志面板**：
-   页面底部提供可折叠的「高级 / 日志」面板，支持直接查看 `uv2800.log` 最新 50 行日志、手动触发设备指针捕获、只读 ADSP 硬件真值，以及在勾选风险确认后手动向 ADSP 写入指定测试电压（2000–5000 mV）。
+1. **加载失败路径完整回滚**：新增 `uv_unregister_all()`，当必需的 `kp_get` / `kp_show` 注册失败时自动逆序反注册先前已注册的所有 kprobe，消除模块初始化失败导致残留探针的潜在风险。
+2. **线程级自读写隔离与并发串行化**：
+   - 将全局 `uv_self_read` / `uv_self_write` 升级为按 `current` 线程指针隔离，配合编译器内建原子锁与 `READ_ONCE` / `WRITE_ONCE` 串行化 `adsp_read` 与 `adsp_write`，防止驱动并发调用意外绕过 hook 或多线程互清标志。
+   - 严格保持 `编译前置/Module.symvers` 的 9 符号最小 KMI 集（零新增外部符号，跨 GKI 6.6.30~6.6.118 免重编加载）。
+3. **错误码与参数语义收敛**：
+   - `adsp_write` 越界返回 `-EINVAL`、未捕获设备指针返回 `-EAGAIN`、驱动返回负错误码时如实透传且不污染 `uv_last_volt`；
+   - `adsp_read` 严格按 `< 0` 判定驱动错误（兼容驱动成功时返回正值电压），失败时清零缓存避免返回陈旧值；
+   - 新增 `uv_initialized` 标志防止加载期传参在 Profile 匹配前抢跑 `votable override`；`resume=0` 同步清除 override、`resume=1` 重放 override；
+   - 修复 `uv_itoa_raw()` 对 `INT_MIN` 的有符号整数溢出边界，移除 4 个只写不读的冗余全局变量。
 
 ---
 
-## 二、「真实电量」与「禁止 1% 超级省电」拆分为独立持久化开关
+## 二、用户态脚本修复与 WebUI 轮询提速
 
-在 v11 中，只要模块处于解耦状态，`service.sh` 就会无条件挂载真实电量并应用禁止 1% 超级省电策略，用户没法只用解容而保留官方平滑电量，或者保留系统超级省电。
-
-v12 将这两项功能抽离为独立的模块库 `模块源目录/lib/features.sh`：
-
-- **显示真实电量**（由 `/data/adb/uv2800_backup/no_real_soc` 标记控制，默认开启）
-- **禁止 1% 强制超级省电**（新增 `/data/adb/uv2800_backup/no_policy` 标记控制，默认开启）
-
-核心改进：
-- **单独切换、秒级响应**：在 WebUI 中拨动这两个开关时，后端只执行对应的 `mount --bind` / `umount` 或 `oplusdevicepolicy` 服务调用并做读回复核，**不会**重跑 `service.sh`，也完全不触碰 ADSP 终止电压。
-- **跨重启记忆与原厂模式联动**：你的开关选择会跨重启持久保留；当点击「恢复原厂」进入原厂模式（`skip`）时，两项功能会自动强制解绑并恢复原厂策略（同时干净清除 `applied` 状态标记）；等你重新启用解容时，又会自动按你之前的开关偏好恢复。
-
----
-
-## 三、内核模块升级：新增 `votable` 覆写，理顺关机票与学习空电点
-
-在深入逆向 ColorOS 15 / 16 / 17 的充电驱动（`oplus_chg_v2.ko`）后，我们对内核模块 `内核源码/uv2800.c` 做了三项关键升级：
-
-1. **引入 `vote_override` 压制原厂高电压票**：
-   驱动里的电压投票器（`GAUGE_TERM_VOLTAGE`、`TARGET_TERM_VOLTAGE`、`GAUGE_SHUTDOWN_VOLTAGE`、`TARGET_SHUTDOWN_VOLTAGE`）聚合规则都是 `VOTE_MAX`，普通投票压不过原厂 3200/3250 mV 的票值。v12 在内核模块中动态解析 `find_votable` 与 `vote_override`（同样配备 `no_sanitize("kcfi")` 跳板），新增 `uv_apply` 参数供 `service.sh` 在开机投票器就绪后重放覆写。
-2. **ColorOS 15（2 票）与 ColorOS 16/17（4 票）自动适配**：
-   逆向证实 ColorOS 15 驱动只创建 `GAUGE_TERM_VOLTAGE` 和 `GAUGE_SHUTDOWN_VOLTAGE` 两个电压投票器（`target_term` 直接内联读设备树表），而 ColorOS 16/17 有四个电压投票器。模块在匹配 Profile 时会自动将预期覆写数设为 2（ColorOS 15）或 4（ColorOS 16/17），确保 `uv_apply` 状态复核在三代系统上完全自洽。
-3. **关机阈值 `V_s` 与电量计学习空电点 `T` 分离控制 + 原厂值防放大修复**：
-   - 新增 `uv_shutdown_mv` 与 `uv_term_mv` 参数（保留 `uv_target_mv` / `uv_adsp_mv` 兼容别名），将 SHUTDOWN 投票器锁定为 `V_s`，将 TERM 投票器与 getter/setter 挂钩锁定为派生后的学习空电点 `T`。
-   - 内核强制令 `T` 跟随 `V_s` 动态派生（忽略外部对 `uv_term_mv` / `uv_adsp_mv` 的独立写入，防止静态值残留）。
-   - 修复了恢复原厂值时的派生边界：当 `V_s < 3060 mV` 时按 `2 * V_s - 3060` 派生；当 `V_s >= 3060 mV`（例如恢复原厂 3250 mV）时直接保持原厂值本身，避免恢复原厂时把 TERM 投票器和挂钩返回值放大到 3440 mV。
+1. **WebUI 状态采集提速约 5 倍**：
+   - [模块源目录/lib/common.sh](模块源目录/lib/common.sh) 改用 POSIX 内建 `read` 与参数展开读取单行 sysfs / 状态文件，减少数十次外部子进程 fork；
+   - 单趟 `awk` 提取日志 `route` / `profile` / `log_lines`（优先复用日志中的 `profile` 避免高频扫 `dmesg`，并规避 Android `mksh` 参数展开对未转义 `|` 的 extglob 解释）；
+   - `_uv_fcc_read()` 对 `dmesg`（`bs`）与 `oplus_mms`（`mms`）两种真值来源均启用 60 秒缓存，并修复读取 `oplus_mms` 后原始 `item_id=0` 未恢复的问题。
+2. **状态复核与并发安全修复**：
+   - `_uv_derived()` 改为纯公式派生（统一复用 [模块源目录/log.sh](模块源目录/log.sh) 的 `uv_derive_term_mv()`），不再回读旧内核 `uv_term_mv`，消除复核假绿；
+   - `webui.sh run-bg` 配合前端独立递增 tag（`status_<seq>` / `op_<seq>`），输出先写 `.out.tmp` 再原子重命名为 `.out` 后落盘 `.rc`，自动清理先前已完成但未被消费的孤儿文件；修复 `write-adsp` 的 `RC=` 键名冲突；
+   - `service.sh` 清理旧进程时豁免完整祖先 PID 链，避免误杀外部调用壳；精简 `service.sh` / `restore.sh` / `uninstall.sh` 的重复内核参数四连写为单写 `uv_target_mv`；
+   - `lib/lock.sh` 关闭 `mkdir` 到写 `pid` 间的瞬时抢锁窗口；`log.sh` 日志截断改用带 PID 后缀的临时文件；`uninstall.sh` 补充清理 `.webui_op.*` / `.webui.last.log` / `.webui.lock`。
+3. **WebUI 交互与文案完善**：
+   - 当 `adsp_orig.txt` 已有合法原厂值（3000~5000 mV）时，历史残留的 `adsp_orig.bad` 仅作为信息提示展示，不再永久屏蔽绿色正常状态横幅；
+   - 补全 `CODE_TEXT` 缺失错误码映射（`invalid_range`、`readback_mismatch`、`override_failed`、`usage`），修正 `NO_ADSP_WRITE` 的按钮禁用范围与刷新 toast 触发时机。
 
 ---
 
-## 四、跨版本读取电量计真实 FCC（修复 ColorOS 15 显示虚高）
+## 三、开源仓库测试链路修复与 CI 加固
 
-在 v11 及更早版本中，查看电量计内部真实全充容量（FCC）依赖的是 `dmesg | grep bs_update_data`；如果没抓到，就回退去读 `/sys/class/oplus_chg/battery/battery_fcc`。
-
-本轮对 6 个版本的 `oplus_chg_v2.ko` 反汇编核实发现：
-- `bs_update_data` 所在的 `STRATEGY_BS` 模块是 **ColorOS 16 才引入的**，ColorOS 15 全系驱动里根本没有这条日志，导致 ColorOS 15 上永远回退去读 `battery_fcc`；
-- 而 `battery_fcc` 的计算公式是 `min(真实FCC + fcc_coeff × SOH / 100, 5920)`，在解容状态下会叠加原厂残留的补偿系数 `fcc_coeff`，导致读出来的数值比电量计真实 FCC 虚高好几百 mAh。
-
-v12 在 `模块源目录/lib/common.sh` 的 `_uv_fcc_read()` 中实现了全版本通用的真值读取链：
-1. 优先命中 60 秒本地短期缓存（`.fcc_raw`，自动忽略负年龄/未来时间戳）；
-2. 尝试只读提取 `dmesg` 中的 `bs_update_data`（ColorOS 16/17 零写入快速路径）；
-3. 若无日志（如 ColorOS 15 或日志环被冲掉），通过 `oplus_mms` gauge 的调试接口写入 `item_id=7`（即 `GAUGE_ITEM_FCC`）读取 `data` 拿到电量计内部真实 FCC，读完立即恢复原 `item_id` 并写入 60 秒缓存；
-4. 最后才回退到 `battery_fcc` 显示值，并在 WebUI 上明确标注「真值」或「显示值」。
-
----
-
-## 五、代码库化重构、注释重写与测试矩阵加固
-
-- **用户态脚本模块化拆分**：将原本集中在单文件里的逻辑拆分为 `lib/common.sh`（读取与数值规范化）、`lib/lock.sh`（互斥锁与并发脚本等待）、`lib/route.sh`（启动路线与命名空间执行）、`lib/features.sh`（独立功能开关）和 `lib/verify.sh`（执行后状态复核），消除了冗余重复代码。
-- **内核与脚本精简清理**：移除了实验期临时加入的 `uv_true_fcc` 探针参数，合并了重复的整数转字符串与 kprobe 符号取址逻辑，将内核日志标识统一更新为 `v12`，并按代码事实重写了全部源码注释与项目文档。
-- **自动化测试矩阵升级**：
-  - 新增宿主侧离线冒烟测试 [自动化测试矩阵/dev/webui_host_smoke.sh](自动化测试矩阵/dev/webui_host_smoke.sh)（12 项协议与分支断言）；
-  - 保留并验证 13 项设备树查表与失败注入测试 [自动化测试矩阵/dt_inject/run_cases.py](自动化测试矩阵/dt_inject/run_cases.py)；
-  - 更新真机测试套件 [自动化测试矩阵/run.sh](自动化测试矩阵/run.sh) 与 [自动化测试矩阵/dev/devver.sh](自动化测试矩阵/dev/devver.sh)，完成了标准加载（LKM）与越狱注入（late-load）双路线真机全量回归测试。
+- 修复 [自动化测试矩阵/dev/webui_host_smoke.sh](自动化测试矩阵/dev/webui_host_smoke.sh)（扩充至 16 项断言）、[自动化测试矩阵/dt_inject/run_cases.py](自动化测试矩阵/dt_inject/run_cases.py) 与 [自动化测试矩阵/dt_inject/mk_v0order_variant.py](自动化测试矩阵/dt_inject/mk_v0order_variant.py) 路径解析，在开源仓库结构下可直接一键运行通过。
+- [.github/workflows/release.yml](.github/workflows/release.yml) 接入打包前离线自检（`sh -n`、`node --check`、`webui_host_smoke.sh`、`dt_inject/run_cases.py`）。
+- 清理仓库中多余的 `uvprobe` 编译中间产物与实验临时脚本，更新 `.gitignore` 与技术文档。
+- 一加 13（ColorOS 16 / 内核 `6.6.118` / 标准 LKM 路线）实机回归测试全部通过（`run.sh --with-dt` 非重启组 + 宿主离线测试 **PASS 25 · FAIL 0**，WebUI 在线调压与功能开关端到端验证通过）。

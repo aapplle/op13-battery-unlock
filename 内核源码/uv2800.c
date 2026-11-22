@@ -14,17 +14,19 @@
 //   uv_apply                      : 写任意值重放 votable override，读回 1 表示全部就绪
 //   adsp_read                     : 写任意值触发直读 ADSP 当前 deep_term_volt，读回上次结果
 //   adsp_write                    : 写电压值主动调用 setter 写入 ADSP，不改变 hook 状态
-//   resume                        : 写 1 启用所有 hook，写 0 旁路所有 hook；读回当前 uv_bypass 状态
+//   resume                        : 写 1 启用所有 hook 并重放 override，写 0 旁路 hook 并清除 override；读回当前 uv_bypass 状态
 //   adsp_debug                    : 1 = 开启 adsp_read 的 dmesg 诊断日志
 //
 // 注意事项：
 //   1. kp_term_get 必须挂在函数内部写回指令之前，入口处目标寄存器尚未写入，在入口修改会被后续指令覆盖。
 //   2. 目标内核启用了 CONFIG_CFI_CLANG，通过函数指针调用内核符号时需加 no_sanitize("kcfi") 避免触发 kCFI 异常。
+//   3. 跨 GKI 内核（6.6.30~6.6.118）仅依赖 Module.symvers 中 9 个基础 KMI 符号，并发同步使用零外部符号的原子/内联原语。
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/kprobes.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
+#include <linux/sched.h>
 
 #define UV_TARGET_MV 2800
 
@@ -34,10 +36,12 @@
  */
 static int uv_target_mv = UV_TARGET_MV;
 static int uv_term_mv = 2540;
-static int uv_adsp_mv = 2540;
-static int uv_shutdown_mv = UV_TARGET_MV;
+static bool uv_initialized;
 
 static void uv_override_apply(void);
+static void uv_override_clear(void);
+static int uv_itoa(char *buf, int v);
+static int uv_itoa_raw(char *buf, int v);
 
 /*
  * 由关机电压 V_s 派生电量计终止电压 T：
@@ -55,9 +59,11 @@ static int uv_derive_term(int vs)
 	return t;
 }
 
+static int uv_bypass; /* 1 = 旁路所有 hook */
+
 static int uv_target_mv_set(const char *val, const struct kernel_param *kp)
 {
-	int v;
+	int v, term;
 
 	if (kstrtoint(val, 10, &v))
 		return -EINVAL;
@@ -65,27 +71,28 @@ static int uv_target_mv_set(const char *val, const struct kernel_param *kp)
 		pr_warn("uv2800: uv_target_mv %d mV 超出范围 2000~5000，拒绝\n", v);
 		return -EINVAL;
 	}
-	uv_target_mv = v;
-	uv_shutdown_mv = v;
-	uv_term_mv = uv_derive_term(v);
-	uv_adsp_mv = uv_term_mv;
-	uv_override_apply();
+	term = uv_derive_term(v);
+	WRITE_ONCE(uv_target_mv, v);
+	WRITE_ONCE(uv_term_mv, term);
+	if (READ_ONCE(uv_initialized) && !READ_ONCE(uv_bypass))
+		uv_override_apply();
 	return 0;
 }
 
-static int uv_itoa(char *buf, int v);
-
 static int uv_target_mv_get(char *buf, const struct kernel_param *kp)
 {
-	return uv_itoa(buf, uv_target_mv);
+	return uv_itoa(buf, READ_ONCE(uv_target_mv));
 }
 
 static const struct kernel_param_ops uv_target_mv_ops = {
 	.set = uv_target_mv_set,
 	.get = uv_target_mv_get,
 };
-module_param_cb(uv_target_mv, &uv_target_mv_ops, &uv_target_mv, 0644);
+module_param_cb(uv_target_mv, &uv_target_mv_ops, NULL, 0644);
 MODULE_PARM_DESC(uv_target_mv, "forced vbat_uv value in mV (default 2800, range 2000~5000)");
+
+module_param_cb(uv_shutdown_mv, &uv_target_mv_ops, NULL, 0644);
+MODULE_PARM_DESC(uv_shutdown_mv, "AP shutdown voltage V_s in mV (default 2800)");
 
 /*
  * uv_adsp_mv / uv_term_mv：电量计终止电压参数。
@@ -93,36 +100,35 @@ MODULE_PARM_DESC(uv_target_mv, "forced vbat_uv value in mV (default 2800, range 
  */
 static int uv_adsp_mv_set(const char *val, const struct kernel_param *kp)
 {
-	int v;
+	int v, target, term;
 
 	if (kstrtoint(val, 10, &v))
 		return -EINVAL;
-	uv_term_mv = uv_derive_term(uv_target_mv);
-	uv_adsp_mv = uv_term_mv;
-	if (v != uv_term_mv)
+	target = READ_ONCE(uv_target_mv);
+	term = uv_derive_term(target);
+	WRITE_ONCE(uv_term_mv, term);
+	if (v != term)
 		pr_info("uv2800: term 由 V_s=%d 派生为 %d mV（忽略写入 %d）\n",
-			uv_target_mv, uv_term_mv, v);
-	uv_override_apply();
+			target, term, v);
+	if (READ_ONCE(uv_initialized) && !READ_ONCE(uv_bypass))
+		uv_override_apply();
 	return 0;
 }
 
 static int uv_adsp_mv_get(char *buf, const struct kernel_param *kp)
 {
-	return uv_itoa(buf, uv_term_mv);
+	return uv_itoa(buf, READ_ONCE(uv_term_mv));
 }
 
 static const struct kernel_param_ops uv_adsp_mv_ops = {
 	.set = uv_adsp_mv_set,
 	.get = uv_adsp_mv_get,
 };
-module_param_cb(uv_adsp_mv, &uv_adsp_mv_ops, &uv_adsp_mv, 0644);
+module_param_cb(uv_adsp_mv, &uv_adsp_mv_ops, NULL, 0644);
 MODULE_PARM_DESC(uv_adsp_mv, "legacy alias of uv_term_mv (QBG learning term)");
 
-module_param_cb(uv_term_mv, &uv_adsp_mv_ops, &uv_term_mv, 0644);
+module_param_cb(uv_term_mv, &uv_adsp_mv_ops, NULL, 0644);
 MODULE_PARM_DESC(uv_term_mv, "QBG learning term in mV (default 2540, range 2000~5000)");
-
-module_param_cb(uv_shutdown_mv, &uv_target_mv_ops, &uv_shutdown_mv, 0644);
-MODULE_PARM_DESC(uv_shutdown_mv, "AP shutdown voltage V_s in mV (default 2800)");
 
 /* 跨版本指令偏移与寄存器配置 */
 struct uv_profile {
@@ -165,39 +171,61 @@ static const struct uv_sig uv_sigs[] = {
 	{ "vbat_uv_show",                  0x20, 0x2a0803e2, "mov w2,w8"    },
 };
 
-static struct kprobe kp_verify;
-
 static int cur_get_reg, cur_set_reg, cur_set_ptr;
 static int uv_override_expected = 4;
 static int cur_profile_idx = -1;
 static const char *cur_profile = "none";
 
-/* 直读与回写运行状态 */
-static void *uv_dev;          /* 电量计 device 指针 */
-static void *uv_set_addr;     /* oplus_fg_set_deep_term_volt 函数地址 */
-static int   uv_bypass;       /* 1 = 旁路所有 hook */
-static int   uv_last_volt;    /* 最近一次通过 adsp_write 写入的电压 */
-static int   uv_self_write;   /* 1 = 当前 setter 调用由本模块发起，hook 放行 */
-static int   uv_self_read;    /* 1 = 当前 getter 调用由本模块发起，hook 放行 */
-static void *uv_get_addr;     /* oplus_fg_get_deep_term_volt 函数地址 */
-static int   uv_adsp_raw;     /* 最近一次直读到的 ADSP 终止电压 */
+/* 直读与回写运行状态（采用任务指针隔离 + 原子状态位串行化） */
+static void *uv_dev;                        /* 电量计 device 指针 */
+static void *uv_set_addr;                   /* oplus_fg_set_deep_term_volt 函数地址 */
+static void *uv_get_addr;                   /* oplus_fg_get_deep_term_volt 函数地址 */
+static int   uv_last_volt;                  /* 最近一次通过 adsp_write 写入成功的电压 */
+static int   uv_adsp_raw;                   /* 最近一次直读到的 ADSP 终止电压 */
+static struct task_struct *uv_self_write_task; /* 本模块发起 setter 的任务指针 */
+static struct task_struct *uv_self_read_task;  /* 本模块发起 getter 的任务指针 */
+static int uv_adsp_busy;
+
+/* 使用编译器内建原子原语，避免依赖 ARM64 LSE alternatives 符号（保持 9 符号最小 KMI 集） */
+static inline bool uv_adsp_trylock(void)
+{
+	int expected = 0;
+
+	return __atomic_compare_exchange_n(&uv_adsp_busy, &expected, 1, false,
+					   __ATOMIC_ACQ_REL, __ATOMIC_RELAXED);
+}
+
+static inline void uv_adsp_unlock(void)
+{
+	__atomic_store_n(&uv_adsp_busy, 0, __ATOMIC_RELEASE);
+}
+
+static noinline void *uv_kprobe_sym(const char *sym)
+{
+	struct kprobe kp;
+	volatile u8 *p = (volatile u8 *)&kp;
+	size_t i;
+	void *addr = NULL;
+
+	/* 手动清零避免编译器生成对 memset 的外部符号调用 */
+	for (i = 0; i < sizeof(kp); i++)
+		p[i] = 0;
+	kp.symbol_name = sym;
+
+	if (!register_kprobe(&kp)) {
+		addr = kp.addr;
+		unregister_kprobe(&kp);
+	}
+	return addr;
+}
 
 static int uv_read_word(const char *sym, unsigned int off, u32 *out)
 {
-	int ret;
+	void *addr = uv_kprobe_sym(sym);
 
-	kp_verify.symbol_name = sym;
-	kp_verify.addr = NULL;
-	kp_verify.offset = 0;
-
-	ret = register_kprobe(&kp_verify);
-	if (ret)
-		return ret;
-
-	*out = *(u32 *)((u8 *)kp_verify.addr + off);
-	unregister_kprobe(&kp_verify);
-	kp_verify.addr = NULL;
-	kp_verify.symbol_name = NULL;
+	if (!addr)
+		return -ENOENT;
+	*out = *(u32 *)((u8 *)addr + off);
 	return 0;
 }
 
@@ -244,7 +272,7 @@ static int uv_detect_profile(void)
 		cur_profile_idx = i;
 		cur_profile = p->name;
 		/* ColorOS 15 仅存在 GAUGE_TERM / GAUGE_SHUTDOWN 两个电压 votable，ColorOS 16/17 为四个 */
-		uv_override_expected = (i == 1) ? 2 : 4;
+		WRITE_ONCE(uv_override_expected, (i == 1) ? 2 : 4);
 		pr_info("uv2800: 匹配 profile [%s]  getter+%#x setter+%#x ABI=%s\n",
 			p->name, p->get_off, p->set_off,
 			p->set_ptr ? "(dev,int*)" : "(dev,int)");
@@ -271,18 +299,6 @@ static const char * const uv_override_names[] = {
 	"TARGET_SHUTDOWN_VOLTAGE",
 };
 
-static void *uv_kprobe_sym(const char *sym)
-{
-	struct kprobe kp = { .symbol_name = sym };
-	void *addr = NULL;
-
-	if (!register_kprobe(&kp)) {
-		addr = kp.addr;
-		unregister_kprobe(&kp);
-	}
-	return addr;
-}
-
 static noinline __attribute__((no_sanitize("kcfi")))
 void *uv_call_find_votable(const char *name, void *fn)
 {
@@ -302,28 +318,33 @@ int uv_call_vote_override(void *v, const char *client, bool active, int mv,
 
 static void uv_override_apply(void)
 {
-	int i, found = 0;
+	int i, found = 0, ok;
+	int target = READ_ONCE(uv_target_mv);
+	int term = READ_ONCE(uv_term_mv);
+	int expected = READ_ONCE(uv_override_expected);
+	void *find_fn = READ_ONCE(uv_find_votable_fn);
+	void *ov_fn = READ_ONCE(uv_vote_override_fn);
 
-	uv_override_ok = 0;
-	if (!uv_find_votable_fn || !uv_vote_override_fn) {
-		uv_find_votable_fn = uv_kprobe_sym("find_votable");
-		uv_vote_override_fn = uv_kprobe_sym("vote_override");
+	if (!find_fn || !ov_fn) {
+		find_fn = uv_kprobe_sym("find_votable");
+		ov_fn = uv_kprobe_sym("vote_override");
+		WRITE_ONCE(uv_find_votable_fn, find_fn);
+		WRITE_ONCE(uv_vote_override_fn, ov_fn);
 	}
-	if (!uv_find_votable_fn || !uv_vote_override_fn) {
+	if (!find_fn || !ov_fn) {
+		WRITE_ONCE(uv_override_ok, 0);
 		pr_warn_once("uv2800: find_votable/vote_override 不可用，无法 override\n");
 		return;
 	}
 
 	for (i = 0; i < ARRAY_SIZE(uv_override_names); i++) {
-		void *v = uv_call_find_votable(uv_override_names[i],
-					       uv_find_votable_fn);
-		int mv = (i < 2) ? uv_term_mv : uv_target_mv;
+		void *v = uv_call_find_votable(uv_override_names[i], find_fn);
+		int mv = (i < 2) ? term : target;
 		int rc;
 
 		if (!v)
 			continue;
-		rc = uv_call_vote_override(v, "UV2800", true, mv,
-					   false, uv_vote_override_fn);
+		rc = uv_call_vote_override(v, "UV2800", true, mv, false, ov_fn);
 		if (rc) {
 			pr_warn("uv2800: vote_override %s=%d 失败 rc=%d\n",
 				uv_override_names[i], mv, rc);
@@ -332,48 +353,53 @@ static void uv_override_apply(void)
 		found++;
 	}
 
-	uv_override_ok = (found >= uv_override_expected);
-	if (found && (uv_override_last_mv != uv_target_mv ||
-		      uv_override_last_term != uv_term_mv || !uv_override_ok)) {
+	ok = (found >= expected);
+	WRITE_ONCE(uv_override_ok, ok);
+	if (found && (uv_override_last_mv != target ||
+		      uv_override_last_term != term || !ok)) {
 		pr_info("uv2800: votable override %d/%d (expected %d) term=%d shutdown=%d mV\n",
 			found, (int)ARRAY_SIZE(uv_override_names),
-			uv_override_expected, uv_term_mv, uv_target_mv);
-		uv_override_last_mv = uv_target_mv;
-		uv_override_last_term = uv_term_mv;
+			expected, term, target);
+		uv_override_last_mv = target;
+		uv_override_last_term = term;
 	}
 }
 
 static int uv_apply_set(const char *val, const struct kernel_param *kp)
 {
-	uv_override_apply();
+	if (!READ_ONCE(uv_bypass))
+		uv_override_apply();
 	return 0;
 }
 
 static int uv_apply_get(char *buf, const struct kernel_param *kp)
 {
-	return uv_itoa(buf, uv_override_ok ? 1 : 0);
+	return uv_itoa(buf, READ_ONCE(uv_override_ok) ? 1 : 0);
 }
 
 static const struct kernel_param_ops uv_apply_ops = {
 	.set = uv_apply_set,
 	.get = uv_apply_get,
 };
-module_param_cb(uv_apply, &uv_apply_ops, &uv_override_ok, 0644);
-MODULE_PARM_DESC(uv_apply, "write to re-apply four votable overrides; read 1 when all four ready");
+module_param_cb(uv_apply, &uv_apply_ops, NULL, 0644);
+MODULE_PARM_DESC(uv_apply, "write to re-apply votable overrides; read 1 when all expected ready");
 
 static void uv_override_clear(void)
 {
 	int i;
+	void *find_fn = READ_ONCE(uv_find_votable_fn);
+	void *ov_fn = READ_ONCE(uv_vote_override_fn);
 
-	if (!uv_find_votable_fn || !uv_vote_override_fn)
+	WRITE_ONCE(uv_override_ok, 0);
+	if (!find_fn || !ov_fn)
 		return;
 	for (i = 0; i < ARRAY_SIZE(uv_override_names); i++) {
-		void *v = uv_call_find_votable(uv_override_names[i],
-					       uv_find_votable_fn);
+		void *v = uv_call_find_votable(uv_override_names[i], find_fn);
 		if (v)
-			uv_call_vote_override(v, "UV2800", false, 0, false,
-					      uv_vote_override_fn);
+			uv_call_vote_override(v, "UV2800", false, 0, false, ov_fn);
 	}
+	uv_override_last_mv = 0;
+	uv_override_last_term = 0;
 }
 
 /* ADSP 终止电压写入封装 */
@@ -391,21 +417,18 @@ int uv_call_setter_ptr(void *dev, int *volt, void *fn)
 	return f(dev, volt);
 }
 
-static int uv_itoa_raw(char *buf, int v);
-
-/* 返回最近一次通过 adsp_write 写入的电压（保持无末尾换行格式） */
+/* 返回最近一次通过 adsp_write 写入成功的电压（保持无末尾换行格式） */
 static int uv_lastvolt_get(char *buf, const struct kernel_param *kp)
 {
-	return uv_itoa_raw(buf, uv_last_volt);
+	return uv_itoa_raw(buf, READ_ONCE(uv_last_volt));
 }
 
 /*
  * resume 参数：控制 hook 是否生效。
- * 写 1 令 uv_bypass=0（启用所有 hook），写 0 令 uv_bypass=1（旁路所有 hook）。
+ * 写 1 令 uv_bypass=0（启用所有 hook 并重放 override），
+ * 写 0 令 uv_bypass=1（旁路所有 hook 并清除 override）。
  * 读取时直接返回 uv_bypass 的当前状态（1 = 已旁路，0 = hook 生效）。
  */
-static int uv_resume_val;
-
 static int uv_resume_set(const char *val, const struct kernel_param *kp)
 {
 	int v;
@@ -419,19 +442,23 @@ static int uv_resume_set(const char *val, const struct kernel_param *kp)
 		return -EINVAL;
 	}
 
-	uv_resume_val = v;
-	uv_bypass = v ? 0 : 1;
+	WRITE_ONCE(uv_bypass, v ? 0 : 1);
 
-	if (v)
+	if (v) {
+		if (READ_ONCE(uv_initialized))
+			uv_override_apply();
 		pr_info("uv2800: resume=1，已退出恢复模式，所有 hook 重新生效\n");
-	else
-		pr_info("uv2800: resume=0，已进入恢复模式，所有 hook 放行\n");
+	} else {
+		if (READ_ONCE(uv_initialized))
+			uv_override_clear();
+		pr_info("uv2800: resume=0，已进入恢复模式，所有 hook 放行并清除 override\n");
+	}
 	return 0;
 }
 
 static int uv_resume_get(char *buf, const struct kernel_param *kp)
 {
-	buf[0] = uv_bypass ? '1' : '0';
+	buf[0] = READ_ONCE(uv_bypass) ? '1' : '0';
 	return 1;
 }
 
@@ -439,21 +466,30 @@ static const struct kernel_param_ops uv_resume_ops = {
 	.set = uv_resume_set,
 	.get = uv_resume_get,
 };
-module_param_cb(resume, &uv_resume_ops, &uv_resume_val, 0644);
+module_param_cb(resume, &uv_resume_ops, NULL, 0644);
 MODULE_PARM_DESC(resume, "write 1 to exit restore mode (re-enable hooks), 0 to enter");
 
-/* 整数转十进制字符串 */
+/* 整数转十进制字符串（使用无符号转换避免 INT_MIN 溢出） */
 static int uv_itoa_raw(char *buf, int v)
 {
 	int n = 0, i;
+	unsigned int u;
 
-	if (v < 0) { buf[n++] = '-'; v = -v; }
-	if (v == 0) {
+	if (v < 0) {
+		buf[n++] = '-';
+		u = 0u - (unsigned int)v;
+	} else {
+		u = (unsigned int)v;
+	}
+	if (u == 0) {
 		buf[n++] = '0';
 	} else {
 		char rev[12];
 		int r = 0;
-		while (v > 0) { rev[r++] = '0' + (v % 10); v /= 10; }
+		while (u > 0) {
+			rev[r++] = '0' + (u % 10u);
+			u /= 10u;
+		}
 		for (i = r - 1; i >= 0; i--)
 			buf[n++] = rev[i];
 	}
@@ -469,37 +505,48 @@ static int uv_itoa(char *buf, int v)
 	return n;
 }
 
-/* 主动调用驱动 setter 将指定电压写入 ADSP，通过 uv_self_write 穿透 setter hook */
-static int uv_adsp_write_val;
-
+/* 主动调用驱动 setter 将指定电压写入 ADSP，通过 current 指针隔离穿透 setter hook */
 static int uv_adsp_write_set(const char *val, const struct kernel_param *kp)
 {
 	int v, rc = 0;
+	void *dev, *set_addr;
 
 	if (kstrtoint(val, 10, &v)) {
 		pr_warn("uv2800: adsp_write 无法解析 '%s'（应写 2000~5000）\n", val);
 		return -EINVAL;
 	}
-
-	uv_adsp_write_val = v;
-
-	if (v >= 2000 && v <= 5000) {
-		if (!uv_dev || !uv_set_addr) {
-			pr_warn("uv2800: 信息不全 (dev=%px set=%px)\n", uv_dev, uv_set_addr);
-			return -EAGAIN;
-		}
-		uv_self_write = 1;
-		if (cur_set_ptr)
-			rc = uv_call_setter_ptr(uv_dev, &v, uv_set_addr);
-		else
-			rc = uv_call_setter_val(uv_dev, v, uv_set_addr);
-		uv_self_write = 0;
-		uv_last_volt = v;
-		pr_info("uv2800: [adsp_write] 写 %d mV，返回 %d（强制仍生效）\n", v, rc);
-	} else if (v != 0) {
+	if (v == 0)
+		return 0;
+	if (v < 2000 || v > 5000) {
 		pr_warn("uv2800: adsp_write 写入 %d 不是有效电压（应写 2000~5000）\n", v);
+		return -EINVAL;
 	}
 
+	dev = READ_ONCE(uv_dev);
+	set_addr = READ_ONCE(uv_set_addr);
+	if (!dev || !set_addr) {
+		pr_warn("uv2800: 信息不全 (dev=%px set=%px)\n", dev, set_addr);
+		return -EAGAIN;
+	}
+
+	if (!uv_adsp_trylock())
+		return -EBUSY;
+
+	WRITE_ONCE(uv_self_write_task, current);
+	if (cur_set_ptr)
+		rc = uv_call_setter_ptr(dev, &v, set_addr);
+	else
+		rc = uv_call_setter_val(dev, v, set_addr);
+	WRITE_ONCE(uv_self_write_task, NULL);
+	uv_adsp_unlock();
+
+	if (rc < 0) {
+		pr_warn("uv2800: [adsp_write] 写 %d mV 失败，返回 %d\n", v, rc);
+		return rc;
+	}
+
+	WRITE_ONCE(uv_last_volt, v);
+	pr_info("uv2800: [adsp_write] 写 %d mV，返回 %d（强制仍生效）\n", v, rc);
 	return 0;
 }
 
@@ -507,7 +554,7 @@ static const struct kernel_param_ops uv_adsp_write_ops = {
 	.set = uv_adsp_write_set,
 	.get = uv_lastvolt_get,
 };
-module_param_cb(adsp_write, &uv_adsp_write_ops, &uv_adsp_write_val, 0644);
+module_param_cb(adsp_write, &uv_adsp_write_ops, NULL, 0644);
 MODULE_PARM_DESC(adsp_write, "write voltage to ADSP without changing force state");
 
 /* 控制 adsp_read 是否向 dmesg 打印诊断日志（默认关闭，减少轮询期的日志噪音） */
@@ -515,7 +562,7 @@ static bool uv_adsp_debug;
 module_param_named(adsp_debug, uv_adsp_debug, bool, 0644);
 MODULE_PARM_DESC(adsp_debug, "1 = print adsp_read diagnostics to dmesg (default 0)");
 
-/* 主动调用驱动 getter 直读 ADSP 当前保存的 deep_term_volt，通过 uv_self_read 穿透 getter hook */
+/* 主动调用驱动 getter 直读 ADSP 当前保存的 deep_term_volt，通过 current 指针隔离穿透 getter hook */
 static noinline __attribute__((no_sanitize("kcfi")))
 int uv_call_getter(void *dev, int *out, void *fn)
 {
@@ -526,31 +573,47 @@ int uv_call_getter(void *dev, int *out, void *fn)
 static int uv_adsp_read_set(const char *val, const struct kernel_param *kp)
 {
 	int out = 0, rc;
+	void *dev = READ_ONCE(uv_dev);
+	void *get_addr = READ_ONCE(uv_get_addr);
 
-	if (uv_get_addr && uv_dev) {
-		uv_self_read = 1;
-		rc = uv_call_getter(uv_dev, &out, uv_get_addr);
-		uv_self_read = 0;
-		uv_adsp_raw = out;
-		if (uv_adsp_debug)
-			pr_info("uv2800: 直读 ADSP deep_term_volt = %d mV (rc=%d)\n", out, rc);
-	} else {
+	if (!get_addr || !dev) {
+		WRITE_ONCE(uv_adsp_raw, 0);
 		if (uv_adsp_debug)
 			pr_warn("uv2800: 直读失败（uv_dev 未捕获 / get 地址未解析）\n");
+		return -EAGAIN;
 	}
+
+	if (!uv_adsp_trylock())
+		return -EBUSY;
+
+	WRITE_ONCE(uv_self_read_task, current);
+	rc = uv_call_getter(dev, &out, get_addr);
+	WRITE_ONCE(uv_self_read_task, NULL);
+	uv_adsp_unlock();
+
+	if (rc < 0) {
+		WRITE_ONCE(uv_adsp_raw, 0);
+		if (uv_adsp_debug)
+			pr_warn("uv2800: 直读 ADSP deep_term_volt 失败 (rc=%d)\n", rc);
+		return rc;
+	}
+
+	WRITE_ONCE(uv_adsp_raw, out);
+	if (uv_adsp_debug)
+		pr_info("uv2800: 直读 ADSP deep_term_volt = %d mV (rc=%d)\n", out, rc);
 	return 0;
 }
 
 static int uv_adsp_read_get(char *buf, const struct kernel_param *kp)
 {
-	return uv_itoa(buf, uv_adsp_raw);
+	return uv_itoa(buf, READ_ONCE(uv_adsp_raw));
 }
 
 static const struct kernel_param_ops uv_adsp_read_ops = {
 	.set = uv_adsp_read_set,
 	.get = uv_adsp_read_get,
 };
-module_param_cb(adsp_read, &uv_adsp_read_ops, &uv_adsp_raw, 0644);
+module_param_cb(adsp_read, &uv_adsp_read_ops, NULL, 0644);
 MODULE_PARM_DESC(adsp_read, "write anything to read raw ADSP deep_term_volt");
 
 /* kprobe 挂钩函数 */
@@ -562,8 +625,8 @@ static struct kprobe kp_get = {
 };
 static int uv_get(struct kprobe *p, struct pt_regs *regs)
 {
-	if (!uv_bypass)
-		regs->regs[8] = uv_target_mv;
+	if (!READ_ONCE(uv_bypass))
+		regs->regs[8] = READ_ONCE(uv_target_mv);
 	return 0;
 }
 
@@ -575,12 +638,12 @@ static struct kprobe kp_show = {
 };
 static int uv_show(struct kprobe *p, struct pt_regs *regs)
 {
-	if (!uv_bypass)
-		regs->regs[8] = uv_target_mv;
+	if (!READ_ONCE(uv_bypass))
+		regs->regs[8] = READ_ONCE(uv_target_mv);
 	return 0;
 }
 
-/* 在 getter 写回结构体前将读出值替换为 uv_term_mv（本模块直读时放行） */
+/* 在 getter 写回结构体前将读出值替换为 uv_term_mv（仅本模块直读线程放行） */
 static int uv_term_get(struct kprobe *p, struct pt_regs *regs);
 static struct kprobe kp_term_get = {
 	.symbol_name = "oplus_fg_get_deep_term_volt",
@@ -588,8 +651,8 @@ static struct kprobe kp_term_get = {
 };
 static int uv_term_get(struct kprobe *p, struct pt_regs *regs)
 {
-	if (!uv_bypass && !uv_self_read)
-		regs->regs[cur_get_reg] = uv_term_mv;
+	if (!READ_ONCE(uv_bypass) && READ_ONCE(uv_self_read_task) != current)
+		regs->regs[cur_get_reg] = READ_ONCE(uv_term_mv);
 	return 0;
 }
 
@@ -602,7 +665,7 @@ static struct kprobe kp_term_entry = {
 };
 static int uv_term_entry(struct kprobe *p, struct pt_regs *regs)
 {
-	uv_dev = (void *)regs->regs[0];
+	WRITE_ONCE(uv_dev, (void *)regs->regs[0]);
 	return 0;
 }
 
@@ -619,14 +682,15 @@ static struct kprobe kp_ddrc = {
 };
 static int uv_ddrc_entry(struct kprobe *p, struct pt_regs *regs)
 {
-	if (!uv_dev) {
-		uv_dev = (void *)regs->regs[0];
-		pr_info("uv2800: 从 deep_dischg 入口捕获 device=%px\n", uv_dev);
+	if (!READ_ONCE(uv_dev)) {
+		void *dev = (void *)regs->regs[0];
+		WRITE_ONCE(uv_dev, dev);
+		pr_info("uv2800: 从 deep_dischg 入口捕获 device=%px\n", dev);
 	}
 	return 0;
 }
 
-/* 在 setter 内部将驱动发起的写入值替换为 uv_term_mv（本模块主动写入时放行） */
+/* 在 setter 内部将驱动发起的写入值替换为 uv_term_mv（仅本模块主动写入线程放行） */
 static int uv_term_set(struct kprobe *p, struct pt_regs *regs);
 static struct kprobe kp_term_set = {
 	.symbol_name = "oplus_fg_set_deep_term_volt",
@@ -634,9 +698,37 @@ static struct kprobe kp_term_set = {
 };
 static int uv_term_set(struct kprobe *p, struct pt_regs *regs)
 {
-	if (!uv_bypass && !uv_self_write)
-		regs->regs[cur_set_reg] = uv_term_mv;
+	if (!READ_ONCE(uv_bypass) && READ_ONCE(uv_self_write_task) != current)
+		regs->regs[cur_set_reg] = READ_ONCE(uv_term_mv);
 	return 0;
+}
+
+static void uv_unregister_all(void)
+{
+	if (kp_ddrc.addr) {
+		unregister_kprobe(&kp_ddrc);
+		kp_ddrc.addr = NULL;
+	}
+	if (kp_term_entry.addr) {
+		unregister_kprobe(&kp_term_entry);
+		kp_term_entry.addr = NULL;
+	}
+	if (kp_term_set.addr) {
+		unregister_kprobe(&kp_term_set);
+		kp_term_set.addr = NULL;
+	}
+	if (kp_term_get.addr) {
+		unregister_kprobe(&kp_term_get);
+		kp_term_get.addr = NULL;
+	}
+	if (kp_show.addr) {
+		unregister_kprobe(&kp_show);
+		kp_show.addr = NULL;
+	}
+	if (kp_get.addr) {
+		unregister_kprobe(&kp_get);
+		kp_get.addr = NULL;
+	}
 }
 
 static int __init uv2800_init(void)
@@ -644,14 +736,14 @@ static int __init uv2800_init(void)
 	int ret, n = 0;
 
 	pr_info("uv2800: v12.0 init (vbat_uv=%d mV, adsp=%d mV)\n",
-		uv_target_mv, uv_adsp_mv);
+		READ_ONCE(uv_target_mv), READ_ONCE(uv_term_mv));
 
 	ret = uv_verify_display();
 	if (ret)
 		return ret;
 
-	uv_get_addr = uv_kprobe_sym("oplus_fg_get_deep_term_volt");
-	uv_set_addr = uv_kprobe_sym("oplus_fg_set_deep_term_volt");
+	WRITE_ONCE(uv_get_addr, uv_kprobe_sym("oplus_fg_get_deep_term_volt"));
+	WRITE_ONCE(uv_set_addr, uv_kprobe_sym("oplus_fg_set_deep_term_volt"));
 
 	ret = uv_detect_profile();
 	if (ret) {
@@ -660,39 +752,74 @@ static int __init uv2800_init(void)
 		kp_term_get.offset = uv_profiles[cur_profile_idx].get_off;
 		kp_term_set.offset = uv_profiles[cur_profile_idx].set_off;
 
-		if (!register_kprobe(&kp_term_get)) n++;
-		if (!register_kprobe(&kp_term_set)) n++;
-		if (!register_kprobe(&kp_term_entry)) n++;
+		if (!register_kprobe(&kp_term_get))
+			n++;
+		else {
+			kp_term_get.addr = NULL;
+			pr_warn("uv2800: kp_term_get 注册失败\n");
+		}
+		if (!register_kprobe(&kp_term_set))
+			n++;
+		else {
+			kp_term_set.addr = NULL;
+			pr_warn("uv2800: kp_term_set 注册失败\n");
+		}
+		if (!register_kprobe(&kp_term_entry))
+			n++;
+		else {
+			kp_term_entry.addr = NULL;
+			pr_warn("uv2800: kp_term_entry 注册失败\n");
+		}
 	}
 
-	if (!register_kprobe(&kp_get)) n++;
-	else { pr_err("uv2800: kp_get 失败\n"); return -EIO; }
-	if (!register_kprobe(&kp_show)) n++;
-	else { pr_err("uv2800: kp_show 失败\n"); return -EIO; }
+	if (!register_kprobe(&kp_get)) {
+		n++;
+	} else {
+		kp_get.addr = NULL;
+		pr_err("uv2800: kp_get 失败\n");
+		ret = -EIO;
+		goto err_cleanup;
+	}
+	if (!register_kprobe(&kp_show)) {
+		n++;
+	} else {
+		kp_show.addr = NULL;
+		pr_err("uv2800: kp_show 失败\n");
+		ret = -EIO;
+		goto err_cleanup;
+	}
 
-	if (!register_kprobe(&kp_ddrc)) n++;
-	else pr_warn("uv2800: kp_ddrc 注册失败（deep_dischg 入口），回退到插拔捕获\n");
+	if (!register_kprobe(&kp_ddrc))
+		n++;
+	else {
+		kp_ddrc.addr = NULL;
+		pr_warn("uv2800: kp_ddrc 注册失败（deep_dischg 入口），回退到插拔捕获\n");
+	}
+
+	WRITE_ONCE(uv_initialized, true);
 
 	/* 若加载时 votable 尚未创建，后续由 service.sh 写 uv_apply 触发重放 */
-	uv_override_apply();
-	if (!uv_override_ok)
-		pr_info("uv2800: votable 尚未就绪，等待 service.sh 写 uv_apply\n");
+	if (!READ_ONCE(uv_bypass)) {
+		uv_override_apply();
+		if (!READ_ONCE(uv_override_ok))
+			pr_info("uv2800: votable 尚未就绪，等待 service.sh 写 uv_apply\n");
+	}
 
 	pr_info("uv2800: v12 ready, %d 个 hook, profile=[%s], vbat_uv=%d adsp=%d\n",
-		n, cur_profile, uv_target_mv, uv_adsp_mv);
+		n, cur_profile, READ_ONCE(uv_target_mv), READ_ONCE(uv_term_mv));
 	pr_info("uv2800: 回写入口 /sys/module/uv2800/parameters/adsp_write（写电压值，如 3250）\n");
 	return 0;
+
+err_cleanup:
+	uv_unregister_all();
+	return ret;
 }
 
 static void __exit uv2800_exit(void)
 {
+	WRITE_ONCE(uv_initialized, false);
 	uv_override_clear();
-	if (kp_ddrc.addr)        unregister_kprobe(&kp_ddrc);
-	if (kp_term_entry.addr)  unregister_kprobe(&kp_term_entry);
-	if (kp_term_set.addr)    unregister_kprobe(&kp_term_set);
-	if (kp_term_get.addr)    unregister_kprobe(&kp_term_get);
-	if (kp_get.addr)         unregister_kprobe(&kp_get);
-	if (kp_show.addr)        unregister_kprobe(&kp_show);
+	uv_unregister_all();
 	pr_info("uv2800: unloaded\n");
 }
 

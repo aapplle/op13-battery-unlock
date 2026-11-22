@@ -2,35 +2,37 @@
 # ============================================================
 # uv2800 - 宿主侧 WebUI 协议 smoke（不连设备）
 # 用法：sh dev/webui_host_smoke.sh
-# 只验证：status ASCII/键、非法输入拒绝、features 默认/标记分支。
+# 只验证：status ASCII/键、非法输入拒绝、纯派生公式、features 默认/标记分支。
 # 真机 apply/restore/锁/命名空间/策略 setter 不在本脚本范围。
 # ============================================================
 set -u
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
-MOD="$ROOT/02-当前最新构建/模块源目录"
+if [ -d "$ROOT/模块源目录" ]; then
+    MOD="$ROOT/模块源目录"
+else
+    MOD="$ROOT/02-当前最新构建/模块源目录"
+fi
 WEBUI="$MOD/webui.sh"
 FEAT="$MOD/lib/features.sh"
+LOGLIB="$MOD/log.sh"
+COMMON="$MOD/lib/common.sh"
 FAIL=0
 
 ok() { echo "PASS $*"; }
 bad() { echo "FAIL $*"; FAIL=1; }
 
-[ -f "$WEBUI" ] || { echo "FAIL missing webui.sh"; exit 1; }
+[ -f "$WEBUI" ] || { echo "FAIL missing webui.sh ($WEBUI)"; exit 1; }
 [ -f "$FEAT" ] || { echo "FAIL missing lib/features.sh"; exit 1; }
 
 OUT=$(sh "$WEBUI" status 2>/tmp/uv-webui-smoke.err)
 RC=$?
 [ "$RC" = 0 ] && ok "status rc=0" || bad "status rc=$RC"
-printf '%s
-' "$OUT" | grep -q '^RESULT=ok$' && ok "status RESULT=ok" || bad "status RESULT"
-printf '%s
-' "$OUT" | grep -q '^NO_POLICY=no$' && ok "status NO_POLICY=no" || bad "status NO_POLICY"
-printf '%s
-' "$OUT" | grep -q '^POLICY=' && ok "status POLICY key" || bad "status POLICY key"
-if printf '%s
-' "$OUT" | LC_ALL=C grep -q '[^ -~]'; then
+printf '%s\n' "$OUT" | grep -q '^RESULT=ok$' && ok "status RESULT=ok" || bad "status RESULT"
+printf '%s\n' "$OUT" | grep -q '^NO_POLICY=no$' && ok "status NO_POLICY=no" || bad "status NO_POLICY"
+printf '%s\n' "$OUT" | grep -q '^POLICY=' && ok "status POLICY key" || bad "status POLICY key"
+if printf '%s\n' "$OUT" | LC_ALL=C grep -q '[^ -~]'; then
     bad "status non-ASCII"
 else
     ok "status ASCII"
@@ -42,9 +44,19 @@ grep -q 'CODE=invalid_value' /tmp/uv-webui-smoke.out && ok "set-real-soc 2 rejec
 sh "$WEBUI" policy x >/tmp/uv-webui-smoke.out 2>&1
 grep -q 'CODE=invalid_value' /tmp/uv-webui-smoke.out && ok "policy x rejected" || bad "policy x"
 
-# features.sh 分支：用临时目录 + stub，不碰真机
+# 纯派生公式回归：即使 $P/uv_term_mv 指向旧值，_uv_derived 仍必须严格按入参计算
 T=/tmp/uv-features-smoke
 rm -rf "$T"; mkdir -p "$T"
+P="$T/params"; mkdir -p "$P"
+echo 2540 > "$P/uv_term_mv"
+. "$LOGLIB"
+. "$COMMON"
+[ "$(_uv_derived 2800)" = "2540" ] && ok "_uv_derived 2800=2540" || bad "_uv_derived 2800"
+[ "$(_uv_derived 2900)" = "2740" ] && ok "_uv_derived 2900=2740 (ignores stale param)" || bad "_uv_derived 2900"
+[ "$(_uv_derived 3060)" = "3060" ] && ok "_uv_derived 3060=3060" || bad "_uv_derived 3060"
+[ "$(_uv_derived 3250)" = "3250" ] && ok "_uv_derived 3250=3250 (no amplification)" || bad "_uv_derived 3250"
+
+# features.sh 分支：用临时目录 + stub，不碰真机
 BK="$T"; XML="$T/devicepolicy.xml"; KEY=test_key
 CS="$T/chip_soc"; CAP="$T/capacity"; CAPUE="$T/uevent"
 : > "$XML"; : > "$CS"; : > "$CAP"

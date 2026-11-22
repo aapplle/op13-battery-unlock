@@ -34,7 +34,13 @@ echo "   源码:   内核源码/uv2800.c ($(stat -c%s "$SRC") B)"
 echo "   内核树: $KT"
 
 export PATH=/usr/lib/llvm-18/bin:$PATH
-make -C "$KT" ARCH=arm64 LLVM=1 M="$SRC_DIR" modules 2>&1 | tail -4
+MLOG="$(mktemp)"
+trap 'rm -f "$MLOG"' EXIT
+if ! make -C "$KT" ARCH=arm64 LLVM=1 M="$SRC_DIR" modules >"$MLOG" 2>&1; then
+    cat "$MLOG"
+    exit 1
+fi
+tail -4 "$MLOG"
 
 llvm-strip --strip-debug "$SRC_DIR/uv2800.ko"
 cp -f "$SRC_DIR/uv2800.ko" "$MOD/uv2800.ko"

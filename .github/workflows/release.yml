@@ -1,14 +1,14 @@
 name: Release
 
-# 发布流程：从 `模块源目录/` 打包出可刷入的 zip，并作为 Release 资产发布。
+# 发布流程：先执行宿主侧离线语法与协议/DT 自检，再从 `模块源目录/` 打包出可刷入的 zip，并作为 Release 资产发布。
 #
-#   · push tag（v*）  → 打包 + 建 Release
-#   · 手动触发        → 只打包，产物在 Actions 的 Artifacts 里
+#   · push tag（v*）  → 自检 + 打包 + 建 Release
+#   · 手动触发        → 自检 + 打包，产物在 Actions 的 Artifacts 里
 #
 # 说明：
-#  1) 本工作流【不重新编译】—— `模块源目录/uv2800.ko` 随仓库提交，且自 v11 起逐字节未变。
+#  1) 本工作流【不重新编译内核模块】—— `模块源目录/uv2800.ko` 随仓库提交。
 #     若改动了 `内核源码/uv2800.c`，请先在本地运行 `自动化测试矩阵/build.sh`
-#     （它会拉内核树、编译、同步 .ko 进 `模块源目录/`）并提交新的 .ko，再打 tag。
+#     （编译并同步新的 `.ko` 进 `模块源目录/`）并提交，再打 tag。
 #     编译步骤见 THIRD-PARTY-NOTICES.md §1.4。
 #  2) 资产名**必须用 ASCII**：softprops/action-gh-release 会把非 ASCII 文件名截坏
 #     （实测 `一加13解容-v11.zip` → `13.-v11.zip`）。zip 内容不受影响，刷入时文件名无所谓。
@@ -30,6 +30,16 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: 宿主侧语法与离线协议/DT 自检
+        run: |
+          set -euo pipefail
+          for f in 模块源目录/*.sh 模块源目录/lib/*.sh; do
+            sh -n "$f"
+          done
+          node --check 模块源目录/webroot/app.js
+          sh 自动化测试矩阵/dev/webui_host_smoke.sh
+          python3 自动化测试矩阵/dt_inject/run_cases.py
 
       - name: 从 模块源目录/ 构建 zip
         id: build

@@ -23,10 +23,7 @@ if [ -d "$P" ]; then
         _orig=$(uv_dt_orig 2>/dev/null)
     fi
     if [ -n "$_orig" ] && [ "$_orig" -ge 3000 ] 2>/dev/null; then
-        echo "$_orig" > "$P/uv_shutdown_mv" 2>/dev/null
         echo "$_orig" > "$P/uv_target_mv" 2>/dev/null
-        echo "$_orig" > "$P/uv_term_mv" 2>/dev/null
-        echo "$_orig" > "$P/uv_adsp_mv" 2>/dev/null
         echo 1 > "$P/resume" 2>/dev/null
         sleep 1
         echo "- 已把 hook 强制值设为原厂 ${_orig} mV（vbat_uv=$(cat /sys/class/oplus_chg/battery/vbat_uv 2>/dev/null)）"
@@ -75,7 +72,8 @@ if [ -f "$BK/adsp_orig.txt" ]; then
 fi
 rm -f "$BK/applied" "$BK/orig_state" "$BK/devicepolicy_orig.xml"
 rm -f "$BK/target_mv" "$BK/no_adsp_write" "$BK/no_real_soc" "$BK/no_policy" 2>/dev/null
-rm -f "$BK/adsp_state" "$BK/.fcc_raw" 2>/dev/null
+rm -f "$BK/adsp_state" "$BK/.fcc_raw" "$BK/.webui.last.log" "$BK"/.webui_op.* 2>/dev/null
+rm -rf "$BK/.webui.lock" 2>/dev/null
 
 if [ -f "$BK/skip" ]; then
     echo "- 检测到 skip 标记（已恢复原厂），已保留 —— 重装后将保持原厂状态"

@@ -355,7 +355,7 @@ id=92 ts=1791140851038 dayno=20261005 hour=03
 5. `deep_dischg_counts` 与 `uv_thr` 在**同一条 DCS 记录**里同时出现两次、取值不同：persist 里 `counts@@1758$$uv_thr@@3250`，当场内核日志里 `counts@@1758$$uv_thr@@3350`。
 6. `oplusreserve2` 的 `media/log/minidump/` 有 3 个共 **176 MB** 的 `SYSTEM_LAST_KMSG@...@PJZ110_11.F.05_2050_202609270850@2026_10_03_*.dat.gz`（= gzip 包着的 tar，内含 `minidump.bin` 87~94 MB + `device.info` + `olc_get_log.txt`），已被拉到 `/tmp/oxlogs/md/`。内含模块 v10 的日志。
 7. `oplusreserve2/media/log/vold/` 有 3 个 `storage_*.tar.gz`（2025-11-05、2025-12-03 ×2，共 7.5 MB）—— 存储卡顿现场快照，未展开分析。
-8. 设备标识：serialID `0xf8d12d30`；UFS `HN8T274EJKX130` / SKhynix / `A401`；DDR5 Hynix 12G。
+8. 设备标识：serialID `<SERIAL_ID>`；UFS `HN8T274EJKX130` / SKhynix / `A401`；DDR5 Hynix 12G。
 9. `oplusreserve1 (sdf2)` 头 64 B 是 UFS 器件描述符（不是文件系统），**不要对它执行 mount**。
 
 ---
@@ -422,7 +422,7 @@ adb -s <SERIAL> pull /data/local/tmp/raw/ /tmp/oxlogs/raw/
 - `oplusreserve2.img` 内 2 个 minidump 文件名：
   `SYSTEM_LAST_KMSG@…@**PJZ110_11.C.89_1890_202604292214**@2026_08_07_19_42_59.dat.gz`
   `SYSTEM_LAST_KMSG@…@**PJZ110_11.C.89_1890_202604292214**@2026_08_10_00_05_56.dat.gz`
-- minidump 内 `device.info`：`version:PJZ110_11.C.89_1890_202604292214`、`serialID 0xf8d12d30`、UFS `HN8T274EJKX130`
+- minidump 内 `device.info`：`version:PJZ110_11.C.89_1890_202604292214`、`serialID <SERIAL_ID>`、UFS `HN8T274EJKX130`
 - `recovery/.version` = `3.7.1_16-Dodge-Color597-V2.2`（第三方 recovery "Dodge"）
 - 5 份 `recovery/last_log*` 的 `ro.build.version.incremental` 全部 = **1777453297284 → 2026-04-29**，slot 全部 `_a`（= C.89）
 - `media/log/criticalLog/persist/critical.log` 内 `log-buildTime`：**879 条 C.86 (`PJZ110_11.C.86_1860_202603040058`, V16.0.0) → 1336 条 C.89 (`PJZ110_11.C.89_1890_202604292214`, V16.1.0)**，文件内顺序 0..878 = C.86、879..2215 = C.89

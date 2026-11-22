@@ -9,7 +9,9 @@
 import sys, os
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROM  = os.path.dirname(os.path.dirname(HERE))
-SRC = os.path.join(ROM, "02-当前最新构建/模块源目录/log.sh")
+SRC = os.path.join(ROM, "模块源目录/log.sh")
+if not os.path.exists(SRC):
+    SRC = os.path.join(ROM, "02-当前最新构建/模块源目录/log.sh")
 OUT = sys.argv[1] if len(sys.argv) > 1 else "/tmp/log_with_v0order.sh"
 
 src = open(SRC).read()

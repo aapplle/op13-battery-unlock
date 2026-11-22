@@ -15,8 +15,7 @@
 #   UV_BOOTIMG=/path/boot.img ./恢复到手机.sh   现场生成：官方提取器 → glk1_gen → 推送
 #   UV_SERIAL=<serial>                         指定设备（默认取第一个 USB 设备）
 #
-#   现场生成用的 boot.img：优先用本地已抽好的副本
-#     05-逆向脚本与产物/厂商驱动与固件/boot_imgs/（6 份，覆盖各内核 release）
+#   现场生成用的 boot.img：从对应 ROM 固件包提取
 #   生成原理与注意事项见 ghostlock-越狱工具/README.md
 #
 # 前提：手机已 root（KSU 管理器 APK 已安装并授权）—— ghostlock 注入时要拿
@@ -81,7 +80,7 @@ elif [ -f "$DEVBAK/profile.bin" ]; then
   echo "    若它绑的内核与设备不符，CLI 会直接拒绝 —— 请改用 UV_BOOTIMG 现场生成。"
 else
   echo "✗ 找不到可用于本内核（$KREL）的 profile"
-  echo "  → 取对应 ROM 的 boot.img（本地副本在 05-逆向脚本与产物/厂商驱动与固件/boot_imgs/），然后："
+  echo "  → 取对应 ROM 的 boot.img，然后："
   echo "      UV_BOOTIMG=<boot.img> $0"
   echo "  原理见 ghostlock-越狱工具/README.md"
   exit 2

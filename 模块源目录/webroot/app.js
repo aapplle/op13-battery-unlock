@@ -19,15 +19,18 @@
     skip_mode: "当前为原厂恢复模式；请先「重新启用」",
     test_marker: "检测到 no_adsp_write 测试标记；请先删除",
     invalid_value: "数值无效（V_s 需 2800~3060）",
+    invalid_range: "电压超出允许范围（ADSP 需 2000~5000）",
     adsp_not_ready: "电量计设备指针未捕获；可重启后重试",
     write_failed: "写入失败；请查看日志",
+    readback_mismatch: "写入后读回值与目标不一致；请查看日志",
+    override_failed: "votable 覆写未就绪；请查看日志",
     restore_failed: "恢复脚本失败；请查看日志/确认电量",
     restore_verify_failed: "恢复后复核不一致；请查看日志/状态",
     bind_failed: "真实电量绑定未生效；请查看日志/命名空间",
     policy_failed: "超级省电策略未应用；请查看日志（不影响 ADSP）",
     low_battery: "电量/电压过低；请先充电，或勾选风险确认",
-    low_voltage: "手动 ADSP 值高于当前电池电压；可能触发钳位",
     orig_failed: "无法计算原厂值；请查看日志/DT",
+    usage: "参数错误；请刷新页面重试",
     internal: "内部错误；请查看日志"
   };
 
@@ -47,6 +50,7 @@
   var toastTimer = null;
   var statusLoading = false;
   var statusSeq = 0;
+  var opSeq = 0;
   var cbSeq = 0;
 
   function $(id) { return document.getElementById(id); }
@@ -310,10 +314,10 @@
     var busy = state.busy;
     var dec = state.mode === "decoupled";
     var factory = state.mode === "factory";
-    var canApply = connected && !busy && (dec || factory);
+    var noAdspWrite = !!(state.status && state.status.NO_ADSP_WRITE === "yes");
+    var canApply = connected && !busy && (dec || factory) && !noAdspWrite;
     var canRestore = connected && !busy && (dec || state.mode === "disabled");
-    var canReal = connected && !busy && dec &&
-      !(state.status && state.status.NO_ADSP_WRITE === "yes");
+    var canReal = connected && !busy && dec;
 
     var slider = $("voltageSlider");
     if (slider) slider.disabled = !canApply;
@@ -341,9 +345,9 @@
     var readAdsp = $("readAdspBtn");
     if (readAdsp) readAdsp.disabled = !canAdv;
     var confirm = $("adspConfirm");
-    if (confirm) confirm.disabled = !canAdv;
+    if (confirm) confirm.disabled = !canAdv || noAdspWrite;
     var write = $("writeAdspBtn");
-    if (write) write.disabled = !canAdv || !confirm || !confirm.checked;
+    if (write) write.disabled = !canAdv || noAdspWrite || !confirm || !confirm.checked;
   }
 
   function renderHeader() {
@@ -391,7 +395,7 @@
       vs = pickNum(kv.TARGET_EFFECTIVE, kv.ADSP_ORIG);
       adsp = pickNum(kv.ADSP_ORIG, kv.EXPECTED_ADSP);
     }
-    setText("heroVsLabel", "关机电压");
+    setText("heroVsLabel", "关机电压 V_s");
     setText("heroVs", vs === null ? "—" : String(vs));
     setText("heroAdsp", adsp === null ? "—" : String(adsp));
     var rm = numOf(kv.BATTERY_RM);
@@ -581,8 +585,13 @@
       problems++;
     }
     if (kv.ADSP_ORIG_BAD === "yes") {
-      addNotice("warn", "原值记录异常（adsp_orig.bad）：请查看日志");
-      problems++;
+      var origNow = numOf(kv.ADSP_ORIG);
+      if (origNow !== null && origNow >= 3000 && origNow <= 5000) {
+        addNotice("info", "存在历史异常原值备份（adsp_orig.bad），当前原值已恢复为 " + origNow + " mV");
+      } else {
+        addNotice("warn", "原值记录异常（adsp_orig.bad）：请查看日志");
+        problems++;
+      }
     }
     if (kv.BATTERY_LOW === "1") {
       addNotice("error", "电量/电压过低：恢复原厂前请先充电，并勾选风险确认");
@@ -652,7 +661,7 @@
     renderAll();
   }
 
-  function waitStatus(seq) {
+  function waitStatus(seq, tag, onDone) {
     var startedAt = Date.now();
     function poll() {
       if (seq !== statusSeq) return;
@@ -661,11 +670,11 @@
         showError("bad_status", "status 超时，请重试");
         return;
       }
-      execAsync(sh("op-result status"), 5000).then(function (r) {
+      execAsync(sh("op-result " + tag), 5000).then(function (r) {
         if (seq !== statusSeq) return;
         var kv = parseKV(r.out);
         if (kv.RESULT === "busy") {
-          setTimeout(poll, 400);
+          setTimeout(poll, 300);
           return;
         }
         statusLoading = false;
@@ -674,6 +683,7 @@
           return;
         }
         applyStatus(r.out);
+        if (typeof onDone === "function") onDone();
       });
     }
     poll();
@@ -684,14 +694,14 @@
     statusLoading = false;
   }
 
-  function loadStatus() {
+  function loadStatus(onDone) {
     if (!hasKsu()) { goOffline(); return; }
     if (statusLoading) return;
     statusLoading = true;
     var seq = ++statusSeq;
-    // 连 status 也放后台：刷新/轮询时同步桥仍会占住 WebView，
-    // 用 run-bg 只启动子进程，再短轮询 op-result。
-    execAsync(sh("run-bg status status"), 5000).then(function (r) {
+    var tag = "status_" + seq;
+    // 每次 status 使用独立 tag，避免被作废的旧后台任务与新请求撞写同一输出文件。
+    execAsync(sh("run-bg " + tag + " status"), 5000).then(function (r) {
       if (seq !== statusSeq) return;
       if (r.code === -1) {
         statusLoading = false;
@@ -704,7 +714,7 @@
         showError("bad_status", "status 启动失败：code=" + r.code + " " + clip(r.err || r.out || "无输出", 300));
         return;
       }
-      waitStatus(seq);
+      waitStatus(seq, tag, onDone);
     });
   }
 
@@ -727,7 +737,7 @@
       (code ? "：CODE=" + code : ""));
   }
 
-  function waitOp(label) {
+  function waitOp(label, tag) {
     var startedAt = Date.now();
     return new Promise(function (resolve) {
       function poll() {
@@ -738,10 +748,10 @@
           resolve(null);
           return;
         }
-        execAsync(sh("op-result op"), 5000).then(function (res) {
+        execAsync(sh("op-result " + tag), 5000).then(function (res) {
           var kv = parseKV(res.out);
           if (kv.RESULT === "busy") {
-            setTimeout(poll, 600);
+            setTimeout(poll, 500);
             return;
           }
           setBusy(false);
@@ -769,9 +779,10 @@
     setBusy(true);
     // 作废点击前已发出的 status 请求，避免旧状态在操作中把开关视觉回滚。
     invalidateStatus();
+    var tag = "op_" + (++opSeq);
     // run-bg 只启动子进程并立即返回；真正命令在后台执行，
     // 避免 ksu.exec 同步桥把 WebView 主线程卡住整个命令时长。
-    return execAsync(sh("run-bg op " + sub), 5000).then(function (res) {
+    return execAsync(sh("run-bg " + tag + " " + sub), 5000).then(function (res) {
       if (res.code === -1) {
         setBusy(false);
         showError("no_ksu", "KernelSU 执行接口不可用");
@@ -785,7 +796,7 @@
         if (hasKsu()) loadStatus();
         return null;
       }
-      return waitOp(label);
+      return waitOp(label, tag);
     })["catch"](function (e) {
       setBusy(false);
       showError("internal", String((e && e.message) || e));
@@ -878,9 +889,8 @@
   function refreshStatus() {
     if (!state.connected || state.busy) return;
     hideError();
-    loadStatus();
+    loadStatus(function () { toast("已刷新状态"); });
     if (state.logOpen) loadLog();
-    toast("已刷新状态");
   }
 
   function captureDev() {

@@ -1,7 +1,11 @@
 #!/system/bin/sh
 # WebUI 状态读取与数值解析辅助库（由 webui.sh 加载）
+# 尽量使用 POSIX shell 内建 read 与参数展开，减少高频轮询时的进程 fork 开销。
 
-_uv_strip_zeros() {
+_UV_CR=$(printf '\r')
+_UV_TAB=$(printf '\t')
+
+_uv_strip_zeros_val() {
     _uvsz_v=$1
     while :; do
         case "$_uvsz_v" in
@@ -12,15 +16,45 @@ _uv_strip_zeros() {
     case "$_uvsz_v" in
         ''|*[!0-9]*) _uvsz_v=0 ;;
     esac
-    printf '%s' "$_uvsz_v"
+    _UV_RET=$_uvsz_v
+}
+
+_uv_strip_zeros() {
+    _uv_strip_zeros_val "$1"
+    printf '%s' "$_UV_RET"
+}
+
+# 单行短文件读取并去除空白/回车，结果写入 _UV_RET（零子进程开销）
+_uv_read_trimmed() {
+    _UV_RET=""
+    [ -r "$1" ] || return 1
+    IFS= read -r _uvrt_v < "$1" 2>/dev/null || [ -n "$_uvrt_v" ] || return 1
+    while :; do
+        case "$_uvrt_v" in
+            *" "*) _uvrt_v="${_uvrt_v%% *}${_uvrt_v#* }" ;;
+            *"$_UV_TAB"*) _uvrt_v="${_uvrt_v%%$_UV_TAB*}${_uvrt_v#*$_UV_TAB}" ;;
+            *"$_UV_CR"*) _uvrt_v="${_uvrt_v%%$_UV_CR*}${_uvrt_v#*$_UV_CR}" ;;
+            *) break ;;
+        esac
+    done
+    _UV_RET=$_uvrt_v
+    return 0
+}
+
+_uv_num_val() {
+    if ! _uv_read_trimmed "$1"; then
+        _UV_RET=NA; return 1
+    fi
+    case "$_UV_RET" in
+        ''|*[!0-9]*) _UV_RET=NA; return 1 ;;
+    esac
+    _uv_strip_zeros_val "$_UV_RET"
+    return 0
 }
 
 _uv_num() {
-    _uvn_v=$(cat "$1" 2>/dev/null | tr -d '[:space:]')
-    case "$_uvn_v" in
-        ''|*[!0-9]*) printf 'NA'; return 1 ;;
-    esac
-    _uv_strip_zeros "$_uvn_v"
+    _uv_num_val "$1" || { printf 'NA'; return 1; }
+    printf '%s' "$_UV_RET"
 }
 
 _uv_yesno() {
@@ -35,35 +69,47 @@ _uv_safe() {
     printf '%s' "$_uvsf_v" | tr -c 'A-Za-z0-9_.:-' '_'
 }
 
-_uv_voltage_mv() {
-    _uvvm_v=$(cat "$VOLT" 2>/dev/null | tr -d '[:space:]')
-    case "$_uvvm_v" in
-        ''|*[!0-9]*) printf 'NA'; return ;;
+_uv_voltage_mv_val() {
+    if ! _uv_read_trimmed "$VOLT"; then
+        _UV_RET=NA; return
+    fi
+    case "$_UV_RET" in
+        ''|*[!0-9]*) _UV_RET=NA; return ;;
     esac
-    _uvvm_v=$((_uvvm_v / 1000))
+    _uvvm_v=$((_UV_RET / 1000))
     if [ "$_uvvm_v" -gt 0 ] 2>/dev/null; then
-        printf '%s' "$_uvvm_v"
+        _UV_RET=$_uvvm_v
     else
-        printf 'NA'
+        _UV_RET=NA
     fi
 }
 
-_uv_temp_c() {
-    _uvt_v=$(cat "$TEMP" 2>/dev/null | tr -d '[:space:]')
+_uv_voltage_mv() {
+    _uv_voltage_mv_val
+    printf '%s' "$_UV_RET"
+}
+
+_uv_temp_c_val() {
+    if ! _uv_read_trimmed "$TEMP"; then
+        _UV_RET=NA; return
+    fi
+    _uvt_v=$_UV_RET
     case "$_uvt_v" in
-        ''|*[!0-9-]*) printf 'NA'; return ;;
-        -) printf 'NA'; return ;;
+        ''|*[!0-9-]*|-) _UV_RET=NA; return ;;
     esac
     if ! [ "$_uvt_v" -eq "$_uvt_v" ] 2>/dev/null; then
-        printf 'NA'; return
+        _UV_RET=NA; return
     fi
     _uvt_s=''
     case "$_uvt_v" in
         -*) _uvt_s='-'; _uvt_v=${_uvt_v#-} ;;
     esac
-    _uvt_w=$((_uvt_v / 10))
-    _uvt_f=$((_uvt_v % 10))
-    printf '%s%s.%s' "$_uvt_s" "$_uvt_w" "$_uvt_f"
+    _UV_RET="${_uvt_s}$((_uvt_v / 10)).$((_uvt_v % 10))"
+}
+
+_uv_temp_c() {
+    _uv_temp_c_val
+    printf '%s' "$_UV_RET"
 }
 
 _uv_bind_layers() {
@@ -95,39 +141,85 @@ _uv_bind_global() {
     fi
 }
 
-_uv_read_adsp() {
+_uv_read_adsp_val() {
     if [ ! -e "$P/adsp_read" ]; then
-        printf 'NA'; return
+        _UV_RET=NA; return
     fi
     echo 1 > "$P/adsp_read" 2>/dev/null
-    _uvra_v=$(cat "$P/adsp_read" 2>/dev/null | tr -d '[:space:]')
-    case "$_uvra_v" in
-        ''|*[!0-9]*) printf 'NA'; return ;;
+    if ! _uv_read_trimmed "$P/adsp_read"; then
+        _UV_RET=NA; return
+    fi
+    case "$_UV_RET" in
+        ''|*[!0-9]*) _UV_RET=NA; return ;;
     esac
-    _uvra_v=$(_uv_strip_zeros "$_uvra_v")
-    if [ "$_uvra_v" -gt 2000 ] 2>/dev/null; then
-        printf '%s' "$_uvra_v"
-    else
-        printf 'NA'
+    _uv_strip_zeros_val "$_UV_RET"
+    if [ "$_UV_RET" -gt 2000 ] 2>/dev/null; then
+        return
+    fi
+    _UV_RET=NA
+}
+
+_uv_read_adsp() {
+    _uv_read_adsp_val
+    printf '%s' "$_UV_RET"
+}
+
+# 单次扫描 uv2800.log，同时提取启动路线、profile 与总行数，避免重复读日志与扫 dmesg
+_uv_scan_log_meta() {
+    _UV_LOG_ROUTE=unknown
+    _UV_LOG_PROFILE=""
+    _UV_LOG_LINES=NA
+    if [ ! -f "$LOG" ]; then
+        return
+    fi
+    _uvsl_out=$(awk '
+    /KSU_LATE_LOAD=/ {
+        s = $0
+        sub(/.*KSU_LATE_LOAD=/, "", s)
+        gsub(/[[:space:]]/, "", s)
+        route = (substr(s, 1, 1) == "1") ? "late-load" : "standard"
+    }
+    /profile=\[/ {
+        p = $0
+        sub(/.*profile=\[/, "", p)
+        sub(/\].*/, "", p)
+        prof = p
+    }
+    END {
+        if (route == "") route = "unknown"
+        printf "%s|%s|%d\n", route, prof, NR
+    }' "$LOG" 2>/dev/null)
+    if [ -n "$_uvsl_out" ]; then
+        IFS='|' read -r _UV_LOG_ROUTE _UV_LOG_PROFILE _UV_LOG_LINES <<EOF
+$_uvsl_out
+EOF
+        [ -n "$_UV_LOG_ROUTE" ] || _UV_LOG_ROUTE=unknown
+        case "$_UV_LOG_LINES" in ''|*[!0-9]*) _UV_LOG_LINES=NA ;; esac
     fi
 }
 
 _uv_route_log() {
-    _uvr_line=$(grep 'KSU_LATE_LOAD=' "$LOG" 2>/dev/null | tail -1)
-    if [ -z "$_uvr_line" ]; then
-        printf 'unknown'; return
-    fi
-    _uvr_val=$(printf '%s\n' "$_uvr_line" | sed 's/.*KSU_LATE_LOAD=//' | tr -d '[:space:]')
-    case "$_uvr_val" in
-        1*) printf 'late-load' ;;
-        *) printf 'standard' ;;
+    _uv_scan_log_meta
+    printf '%s' "$_UV_LOG_ROUTE"
+}
+
+_uv_normalize_profile() {
+    case "$1" in
+        *"ColorOS 16"*|*"ColorOS 17"*|*cos16*|*cos17*) _UV_RET=cos16_17 ;;
+        *"ColorOS 15"*|*cos15*) _UV_RET=cos15 ;;
+        *none*) _UV_RET=none ;;
+        *) _UV_RET=unknown ;;
     esac
 }
 
-_uv_profile() {
-    _uvpr_v=$(dmesg 2>/dev/null | grep 'uv2800: v12 ready' | tail -1 | sed -n 's/.*profile=\[\([^]]*\)\].*/\1/p')
-    if [ -z "$_uvpr_v" ]; then
+# 优先使用已扫描的日志 profile（避免高频扫 dmesg），缺失时再查 dmesg 与系统属性
+_uv_profile_val() {
+    _uvpr_v=${1:-}
+    if [ -z "$_uvpr_v" ] && [ -f "$LOG" ]; then
         _uvpr_v=$(grep 'profile=' "$LOG" 2>/dev/null | tail -1 | sed -n 's/.*profile=\[\([^]]*\)\].*/\1/p')
+    fi
+    if [ -z "$_uvpr_v" ]; then
+        _uvpr_v=$(dmesg 2>/dev/null | grep 'uv2800: v12 ready' | tail -1 | sed -n 's/.*profile=\[\([^]]*\)\].*/\1/p')
     fi
     if [ -z "$_uvpr_v" ]; then
         case "$(getprop ro.build.display.id 2>/dev/null)" in
@@ -135,20 +227,26 @@ _uv_profile() {
             *16.*|*17.*) _uvpr_v=cos16_17 ;;
         esac
     fi
-    case "$_uvpr_v" in
-        *"ColorOS 16"*|*"ColorOS 17"*|*cos16*|*cos17*) printf 'cos16_17' ;;
-        *"ColorOS 15"*|*cos15*) printf 'cos15' ;;
-        *none*) printf 'none' ;;
-        *) printf 'unknown' ;;
-    esac
+    _uv_normalize_profile "$_uvpr_v"
+}
+
+_uv_profile() {
+    _uv_profile_val ""
+    printf '%s' "$_UV_RET"
+}
+
+_uv_orig_state_val() {
+    if _uv_read_trimmed "$BK/orig_state"; then
+        case "$_UV_RET" in
+            existed|absent) return ;;
+        esac
+    fi
+    _UV_RET=NA
 }
 
 _uv_orig_state() {
-    _uvos_v=$(cat "$BK/orig_state" 2>/dev/null | tr -d '[:space:]')
-    case "$_uvos_v" in
-        existed|absent) printf '%s' "$_uvos_v" ;;
-        *) printf 'NA' ;;
-    esac
+    _uv_orig_state_val
+    printf '%s' "$_UV_RET"
 }
 
 _uv_log_lines() {
@@ -169,30 +267,24 @@ _uv_loaded() {
     return 1
 }
 
-_uv_term_target() {
-    _uvtt_v=$(cat "$P/uv_term_mv" 2>/dev/null | tr -d '[:space:]')
-    case "$_uvtt_v" in
-        ''|*[!0-9]*) _uvtt_v=$(cat "$BK/term_mv" 2>/dev/null | tr -d '[:space:]') ;;
-    esac
-    case "$_uvtt_v" in
-        ''|*[!0-9]*)
-            if [ -n "${1:-}" ] && [ "$1" -ge 2000 ] 2>/dev/null; then
-                if [ "$1" -lt 3060 ] 2>/dev/null; then
-                    _uvtt_v=$((2 * $1 - 3060))
-                else
-                    _uvtt_v=$1
-                fi
-            else
-                _uvtt_v=2540
-            fi
-            ;;
-    esac
-    printf '%s' "$_uvtt_v"
-}
-
+# 纯公式派生期望的电量计学习终止电压（严格由入参 V_s 计算，不读取内核当前状态）
 _uv_derived() {
-    _uv_derived_term=$(_uv_term_target "${1:-}")
-    printf '%s' "$_uv_derived_term"
+    _uvd_v=${1:-}
+    if command -v uv_derive_term_mv >/dev/null 2>&1; then
+        uv_derive_term_mv "$_uvd_v"
+        return
+    fi
+    case "$_uvd_v" in
+        ''|*[!0-9]*) printf '2540'; return ;;
+    esac
+    if [ "$_uvd_v" -lt 3060 ] 2>/dev/null; then
+        _uvd_t=$((2 * _uvd_v - 3060))
+    else
+        _uvd_t=$_uvd_v
+    fi
+    [ "$_uvd_t" -lt 2000 ] 2>/dev/null && _uvd_t=2000
+    [ "$_uvd_t" -gt 5000 ] 2>/dev/null && _uvd_t=5000
+    printf '%s' "$_uvd_t"
 }
 
 _uv_mms_dir() {
@@ -200,7 +292,8 @@ _uv_mms_dir() {
 }
 
 # 读取电量计 FCC：
-# 优先命中 60 秒内的缓存；否则依次尝试 dmesg 的 bs_update_data、oplus_mms 的 item 7（GAUGE_ITEM_FCC），
+# 优先命中 60 秒内的缓存（bs 与 mms 均缓存，减少 dmesg 与 sysfs 轮询开销）；
+# 否则依次尝试 dmesg 的 bs_update_data、oplus_mms 的 item 7（GAUGE_ITEM_FCC），
 # 最后回退到 sysfs 的 battery_fcc 显示值。
 _uv_fcc_read() {
     _uvfr_v=NA
@@ -223,27 +316,41 @@ _uv_fcc_read() {
     _uvrf_v=$(dmesg 2>/dev/null | grep 'bs_update_data' | tail -1 | sed -n 's/.* fcc=\([0-9][0-9]*\).*/\1/p')
     case "$_uvrf_v" in
         ''|*[!0-9]*) ;;
-        *) _uvfr_v=$_uvrf_v; _uvfr_src=bs; return ;;
+        *)
+            _uvfr_v=$_uvrf_v
+            _uvfr_src=bs
+            [ "$_now" -gt 0 ] 2>/dev/null && printf '%s %s %s\n' "$_uvfr_v" "$_uvfr_src" "$_now" > "$BK/.fcc_raw" 2>/dev/null
+            return
+            ;;
     esac
 
-    _uvg=$(_uv_mms_dir)
+    _uvg=/sys/devices/platform/soc/soc:oplus,mms_gauge/oplus_mms/gauge
     if [ -w "$_uvg/item_id" ]; then
-        _orig=$(cat "$_uvg/item_id" 2>/dev/null | tr -d '[:space:]')
-        case "$_orig" in ''|*[!0-9]*) _orig=0 ;; esac
+        _orig=""
+        if _uv_read_trimmed "$_uvg/item_id"; then
+            case "$_UV_RET" in ''|*[!0-9]*) _orig="" ;; *) _orig=$_UV_RET ;; esac
+        fi
         echo 7 > "$_uvg/item_id" 2>/dev/null
-        _raw=$(cat "$_uvg/data" 2>/dev/null | tr -d '[:space:]')
-        [ "$_orig" -gt 0 ] 2>/dev/null && echo "$_orig" > "$_uvg/item_id" 2>/dev/null
+        _raw=""
+        _uv_read_trimmed "$_uvg/data" && _raw=$_UV_RET
+        [ -n "$_orig" ] && [ "$_orig" != "7" ] && echo "$_orig" > "$_uvg/item_id" 2>/dev/null
         case "$_raw" in
             ''|*[!0-9]*) ;;
-            *) _uvfr_v=$_raw; _uvfr_src=mms; echo "$_uvfr_v $_uvfr_src $_now" > "$BK/.fcc_raw" 2>/dev/null; return ;;
+            *)
+                _uvfr_v=$_raw
+                _uvfr_src=mms
+                [ "$_now" -gt 0 ] 2>/dev/null && printf '%s %s %s\n' "$_uvfr_v" "$_uvfr_src" "$_now" > "$BK/.fcc_raw" 2>/dev/null
+                return
+                ;;
         esac
     fi
 
-    _uvrf_v=$(cat "$FCC" 2>/dev/null | tr -d '[:space:]')
-    case "$_uvrf_v" in
-        ''|*[!0-9]*) ;;
-        *) _uvfr_v=$_uvrf_v; _uvfr_src=display ;;
-    esac
+    if _uv_read_trimmed "$FCC"; then
+        case "$_UV_RET" in
+            ''|*[!0-9]*) ;;
+            *) _uvfr_v=$_UV_RET; _uvfr_src=display ;;
+        esac
+    fi
 }
 
 _uv_parse_mv() {
@@ -251,7 +358,8 @@ _uv_parse_mv() {
     case "$_uvp_v" in
         ''|*[!0-9]*) return 1 ;;
     esac
-    _uvp_v=$(_uv_strip_zeros "$_uvp_v")
+    _uv_strip_zeros_val "$_uvp_v"
+    _uvp_v=$_UV_RET
     [ ${#_uvp_v} -le 4 ] || return 1
     [ "$_uvp_v" -ge 2800 ] 2>/dev/null || return 1
     [ "$_uvp_v" -le 3060 ] 2>/dev/null || return 1
@@ -260,16 +368,17 @@ _uv_parse_mv() {
 }
 
 _uv_orig_ref() {
-    _uvor_v=$(cat "$BK/adsp_orig.txt" 2>/dev/null | tr -d '[:space:]')
-    case "$_uvor_v" in
-        ''|*[!0-9]*) : ;;
-        *)
-            _uvor_v=$(_uv_strip_zeros "$_uvor_v")
-            if [ "$_uvor_v" -ge 3000 ] 2>/dev/null && [ "$_uvor_v" -le 5000 ] 2>/dev/null; then
-                printf '%s' "$_uvor_v"; return 0
-            fi
-            ;;
-    esac
+    if _uv_read_trimmed "$BK/adsp_orig.txt"; then
+        case "$_UV_RET" in
+            ''|*[!0-9]*) : ;;
+            *)
+                _uv_strip_zeros_val "$_UV_RET"
+                if [ "$_UV_RET" -ge 3000 ] 2>/dev/null && [ "$_UV_RET" -le 5000 ] 2>/dev/null; then
+                    printf '%s' "$_UV_RET"; return 0
+                fi
+                ;;
+        esac
+    fi
     _uvor_v=$(uv_dt_orig 2>/dev/null | tail -1 | tr -d '[:space:]')
     case "$_uvor_v" in
         ''|*[!0-9]*) printf 'NA'; return 1 ;;

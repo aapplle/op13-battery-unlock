@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="light dark">
 <title>一加13解容 · WebUI</title>
-<link rel="stylesheet" href="style.css?v=43p">
+<link rel="stylesheet" href="style.css?v=12">
 </head>
 <body>
 <div class="app" id="app">
@@ -121,7 +121,7 @@
       </label>
 
       <button class="btn danger" id="restoreBtn" type="button" disabled>恢复原厂</button>
-      <p class="hint" id="restoreHint">执行前需确保当前电池电压 &gt; 3250 mV</p>
+      <p class="hint" id="restoreHint">执行前需确保当前电池电压高于原厂终止电压</p>
     </section>
 
     <section class="card">
@@ -145,7 +145,7 @@
           <b>禁止 1% 强制超级省电</b>
           <span id="superSaverHint">开：已禁止系统在 1% 时进入超级省电</span>
         </div>
-        <button class="switch" id="superSaverSwitch" type="button" role="switch" aria-checked="false" aria-label="禁止 1% 强制超级省电"><span></span></button>
+        <button class="switch" id="superSaverSwitch" type="button" role="switch" aria-checked="false" aria-label="禁止 1% 强制超级省电" disabled><span></span></button>
       </div>
     </section>
 
@@ -207,6 +207,6 @@
 </div>
 
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
-<script src="app.js?v=43p"></script>
+<script src="app.js?v=12"></script>
 </body>
 </html>

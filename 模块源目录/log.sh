@@ -19,9 +19,24 @@ uv_log_sep() {
     _n=$(wc -l < "$UV_LOG" 2>/dev/null)
     case "$_n" in ''|*[!0-9]*) _n=0 ;; esac
     if [ "$_n" -gt 3000 ]; then
-        tail -1500 "$UV_LOG" > "$UV_LOG.tmp" 2>/dev/null && mv "$UV_LOG.tmp" "$UV_LOG" 2>/dev/null
+        tail -1500 "$UV_LOG" > "$UV_LOG.tmp.$$" 2>/dev/null && mv -f "$UV_LOG.tmp.$$" "$UV_LOG" 2>/dev/null
     fi
     uv_log "---------- $1 ----------"
+}
+
+# 由关机电压 V_s 派生电量计学习终止电压 T（单一公式真源）：
+# V_s < 3060 时为 2 * V_s - 3060；V_s >= 3060 时保持原值不变；边界钳制到 2000~5000。
+uv_derive_term_mv() {
+    _udt_v=$1
+    case "$_udt_v" in ''|*[!0-9]*) printf '2540'; return 1 ;; esac
+    if [ "$_udt_v" -lt 3060 ] 2>/dev/null; then
+        _udt_t=$((2 * _udt_v - 3060))
+    else
+        _udt_t=$_udt_v
+    fi
+    [ "$_udt_t" -lt 2000 ] 2>/dev/null && _udt_t=2000
+    [ "$_udt_t" -gt 5000 ] 2>/dev/null && _udt_t=5000
+    printf '%s' "$_udt_t"
 }
 
 # 记录内核模块加载后自报的 profile 信息到持久化日志
@@ -96,17 +111,17 @@ uv_dt_orig() {
     fi
     _ddrc="$_dtb/$_batt/ddrc_strategy"
 
-    _o_cnt=$(cat /sys/devices/virtual/oplus_chg/common/deep_dischg_counts 2>/dev/null)
-    _o_cc=$(cat /sys/class/oplus_chg/battery/battery_cc 2>/dev/null)
-    _o_cali=$(cat /sys/devices/virtual/oplus_chg/common/deep_dischg_count_cali 2>/dev/null)
-    _o_temp=$(cat /sys/class/power_supply/battery/temp 2>/dev/null)
-    [ -n "$UV_T_CNT" ]  && _o_cnt=$UV_T_CNT
-    [ -n "$UV_T_CC" ]   && _o_cc=$UV_T_CC
-    [ -n "$UV_T_CALI" ] && _o_cali=$UV_T_CALI
-    [ -n "$UV_T_TEMP" ] && _o_temp=$UV_T_TEMP
+    _o_cnt=$(cat /sys/devices/virtual/oplus_chg/common/deep_dischg_counts 2>/dev/null | tr -d '[:space:]')
+    _o_cc=$(cat /sys/class/oplus_chg/battery/battery_cc 2>/dev/null | tr -d '[:space:]')
+    _o_cali=$(cat /sys/devices/virtual/oplus_chg/common/deep_dischg_count_cali 2>/dev/null | tr -d '[:space:]')
+    _o_temp=$(cat /sys/class/power_supply/battery/temp 2>/dev/null | tr -d '[:space:]')
+    [ -n "${UV_T_CNT+x}" ]  && [ -n "$UV_T_CNT" ]  && _o_cnt=$UV_T_CNT
+    [ -n "${UV_T_CC+x}" ]   && [ -n "$UV_T_CC" ]   && _o_cc=$UV_T_CC
+    [ -n "${UV_T_CALI+x}" ] && [ -n "$UV_T_CALI" ] && _o_cali=$UV_T_CALI
+    [ -n "${UV_T_TEMP+x}" ] && [ -n "$UV_T_TEMP" ] && _o_temp=$UV_T_TEMP
     case "$_o_cnt"  in ''|*[!0-9]*) _o_fail "counts 非数字: '$_o_cnt'"; return 1 ;; esac
     case "$_o_cc"   in ''|*[!0-9]*) _o_fail "cc 非数字: '$_o_cc'";       return 1 ;; esac
-    if [ -e /sys/devices/virtual/oplus_chg/common/deep_dischg_count_cali ]; then
+    if [ -n "${UV_T_CALI+x}" ] || [ -e /sys/devices/virtual/oplus_chg/common/deep_dischg_count_cali ]; then
         case "$_o_cali" in
             ''|*[!0-9]*)
                 _o_fail "count_cali 读值非法: '$_o_cali'（节点存在但不可解析）"

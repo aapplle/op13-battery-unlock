@@ -29,7 +29,7 @@
 #   UV_ROUTE    强制路线 standard|late-load（默认由 dev/route.sh 判定）
 #   UV_WIFI     无线 adb 地址（可选，如 <DEVICE_IP>:5555）
 #   UV_FLOOR    ADSP 派生的 floor（默认 3060 = 新机原厂关机电压）
-#   UV_ZIP      模块 zip 路径（默认 = ../一加13解容-v12.zip）
+#   UV_ZIP      模块 zip 路径（默认 = ../一加13解容-v12.1.zip）
 #   UV_DT=1     开启可选组 TD（默认关闭；见下方 TD 组说明）
 #
 # 输出：results/<时间戳>/{report.json,report.md,logs/}
@@ -45,7 +45,7 @@ DEV_DIR="$HERE/dev"
 DEV_TMP=/data/local/tmp/uvtest
 FLOOR="${UV_FLOOR:-3060}"   # 规格：FLOOR=3060（= 新机原厂关机电压 = 电量计模型计数下限）
 # P2-12 修复（2026-10-04）：默认改为当前构建产物（原指向已不存在的 ../ksu-module/v10.19.zip）
-ZIP="${UV_ZIP:-$HERE/../一加13解容-v12.zip}"
+ZIP="${UV_ZIP:-$HERE/../一加13解容-v12.1.zip}"
 JAILBREAK_CMD="/data/local/tmp/ghostlock --load-prebuilt-profile /data/local/tmp/profile.bin"
 TS="$(date +%Y%m%d-%H%M%S)"
 OUT="${UV_OUT:-$HERE/results/$TS}"   # UV_OUT 可覆盖（冒烟/试跑时避免污染 results/）
@@ -186,7 +186,9 @@ ensure_module() {
   if [ "$ADOPTED" != 1 ] && [ -n "$zipver" ] && { [ "$zipver" != "$devver" ] || [ -z "$devmd5" ] || [ "$zipmd5" != "$devmd5" ]; }; then
     say "⚠️ 构建不一致：设备=$devver/${devmd5:-无记录}  被测=$zipver/$zipmd5 → 卸载并重装"
     timeout 60 adb -s "$DEV" shell "su -c '/data/adb/ksu/bin/ksud module uninstall uv2800'" >/dev/null 2>&1
-    timeout 30 adb -s "$DEV" shell "su -c 'rmmod uv2800'" >/dev/null 2>&1
+    if [ "${ROUTE:-}" != "late-load" ]; then
+      timeout 30 adb -s "$DEV" shell "su -c 'rmmod uv2800'" >/dev/null 2>&1
+    fi
     timeout 30 adb -s "$DEV" shell "su -c 'rm -rf /data/adb/modules/uv2800'" >/dev/null 2>&1
     sleep 2
   fi
@@ -634,7 +636,7 @@ t_T5_1() { want T5.1 || return 0; case_begin T5.1 "解耦态 touch skip + 重启
   A "skip = yes" skip eq yes
   case_end; }
 
-#CASE T6.1|自定义关机电压 2800 → ADSP 2600
+#CASE T6.1|自定义关机电压 2800 → ADSP 2540
 t_T6_1() { want T6.1 || return 0; case_begin T6.1 "target=2800 → ADSP=派生值"
   ensure_decouple 2800; snap; local e; e="$(derived_adsp 2800)"
   A "target_file = 2800" target_file eq 2800
@@ -642,7 +644,7 @@ t_T6_1() { want T6.1 || return 0; case_begin T6.1 "target=2800 → ADSP=派生�
   A "adsp_read = $e" adsp_read eq "$e"
   case_end; }
 
-#CASE T6.2|自定义关机电压 2900 → ADSP 2800
+#CASE T6.2|自定义关机电压 2900 → ADSP 2740
 t_T6_2() { want T6.2 || return 0; case_begin T6.2 "target=2900 → ADSP=派生值"
   apply_target 2900; snap; local e; e="$(derived_adsp 2900)"
   A "uv_target_mv = 2900" param_target eq 2900
@@ -650,7 +652,7 @@ t_T6_2() { want T6.2 || return 0; case_begin T6.2 "target=2900 → ADSP=派生�
   A "adsp_read = $e" adsp_read eq "$e"
   case_end; }
 
-#CASE T6.3|自定义关机电压 3000 → ADSP 3000（FLOOR 处偏移归零）
+#CASE T6.3|自定义关机电压 3000 → ADSP 2940
 t_T6_3() { want T6.3 || return 0; case_begin T6.3 "target=3000 → ADSP=派生值"
   apply_target 3000; snap; local e; e="$(derived_adsp 3000)"
   A "uv_target_mv = 3000" param_target eq 3000
@@ -948,7 +950,7 @@ if [ "$RESUME" = 1 ]; then
 fi
 run_case() {
   local id="$1"; shift
-  if [ -n "$RESUME_IDS" ] && echo " $RESUME_IDS " | grep -q " $id "; then
+  if [ -n "$RESUME_IDS" ] && echo " $RESUME_IDS " | grep -Fq " $id "; then
     say ""; say "── $id  （resume：上次已 PASS，跳过）"
     SKIP=$((SKIP+1))
     JSON_ROWS+=("{\"case\":\"$id\",\"name\":\"(resumed)\",\"result\":\"SKIP\",\"assert\":\"resume: 上次已 PASS\"}")
@@ -963,7 +965,7 @@ run_case() {
 # ============================================================
 # 可选组 TD：uv_dt_orig() 失败注入（宿主侧，**默认不跑**）
 #   开启：./run.sh --with-dt   |   UV_DT=1 ./run.sh   |   ./run.sh TD
-#   资产：03-自动化测试矩阵/dt_inject/（runner / 语料生成器 / base 基线 / 哨兵）
+#   资产：自动化测试矩阵/dt_inject/（runner / 语料生成器 / base 基线 / 哨兵）
 #   设计说明与 13 例清单：dt_inject/README.md（含"假绿"教训与哨兵意义）
 #   ⚠️ 默认不参与计数，因此**不影响任何兼容性结论**（开启时才出现在报告里）。
 # ============================================================
