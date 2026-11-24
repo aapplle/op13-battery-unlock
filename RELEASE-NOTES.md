@@ -1,43 +1,29 @@
-# 一加 13 解容模块 uv2800 v12.1 发布说明
+# 一加 13 解容模块 uv2800 v12.2 发布说明
 
-`v12.1`（`version=12.1` / `versionCode=36`）是 `v12` 之后的健壮性加固与性能优化版本，聚焦内核安全边界、用户态并发与状态复核准确性、WebUI 轮询性能以及开源仓库自动化自检，核心行为与跨 ColorOS 15 / 16 / 17 兼容性完全延续 `v12`。
-
----
-
-## 一、内核模块健壮性加固（`uv2800.c` / `uv2800.ko`）
-
-1. **加载失败路径完整回滚**：新增 `uv_unregister_all()`，当必需的 `kp_get` / `kp_show` 注册失败时自动逆序反注册先前已注册的所有 kprobe，消除模块初始化失败导致残留探针的潜在风险。
-2. **线程级自读写隔离与并发串行化**：
-   - 将全局 `uv_self_read` / `uv_self_write` 升级为按 `current` 线程指针隔离，配合编译器内建原子锁与 `READ_ONCE` / `WRITE_ONCE` 串行化 `adsp_read` 与 `adsp_write`，防止驱动并发调用意外绕过 hook 或多线程互清标志。
-   - 严格保持 `编译前置/Module.symvers` 的 9 符号最小 KMI 集（零新增外部符号，跨 GKI 6.6.30~6.6.118 免重编加载）。
-3. **错误码与参数语义收敛**：
-   - `adsp_write` 越界返回 `-EINVAL`、未捕获设备指针返回 `-EAGAIN`、驱动返回负错误码时如实透传且不污染 `uv_last_volt`；
-   - `adsp_read` 严格按 `< 0` 判定驱动错误（兼容驱动成功时返回正值电压），失败时清零缓存避免返回陈旧值；
-   - 新增 `uv_initialized` 标志防止加载期传参在 Profile 匹配前抢跑 `votable override`；`resume=0` 同步清除 override、`resume=1` 重放 override；
-   - 修复 `uv_itoa_raw()` 对 `INT_MIN` 的有符号整数溢出边界，移除 4 个只写不读的冗余全局变量。
+`v12.2`（`version=12.2` / `versionCode=37`）是一个关键修复版本，解决 `v12` 后期 / `v12.1` 在设定关机电压（如 `2800 mV`）后跌破阈值仍延迟至约 `2600 mV` 才关机的问题，并修复 `v12.1` 审计发现的读写锁争用与壳层读值残留两处缺陷。跨 ColorOS 15 / 16 / 17 与 GKI 6.6.30~6.6.118 免重编兼容性保持不变。
 
 ---
 
-## 二、用户态脚本修复与 WebUI 轮询提速
+## 一、核心修复：解决低电 `ui_soc` 卡死 2% 延迟关机（`uv2800.c` / `uv2800.ko`）
 
-1. **WebUI 状态采集提速约 5 倍**：
-   - [模块源目录/lib/common.sh](模块源目录/lib/common.sh) 改用 POSIX 内建 `read` 与参数展开读取单行 sysfs / 状态文件，减少数十次外部子进程 fork；
-   - 单趟 `awk` 提取日志 `route` / `profile` / `log_lines`（优先复用日志中的 `profile` 避免高频扫 `dmesg`，并规避 Android `mksh` 参数展开对未转义 `|` 的 extglob 解释）；
-   - `_uv_fcc_read()` 对 `dmesg`（`bs`）与 `oplus_mms`（`mms`）两种真值来源均启用 60 秒缓存，并修复读取 `oplus_mms` 后原始 `item_id=0` 未恢复的问题。
-2. **状态复核与并发安全修复**：
-   - `_uv_derived()` 改为纯公式派生（统一复用 [模块源目录/log.sh](模块源目录/log.sh) 的 `uv_derive_term_mv()`），不再回读旧内核 `uv_term_mv`，消除复核假绿；
-   - `webui.sh run-bg` 配合前端独立递增 tag（`status_<seq>` / `op_<seq>`），输出先写 `.out.tmp` 再原子重命名为 `.out` 后落盘 `.rc`，自动清理先前已完成但未被消费的孤儿文件；修复 `write-adsp` 的 `RC=` 键名冲突；
-   - `service.sh` 清理旧进程时豁免完整祖先 PID 链，避免误杀外部调用壳；精简 `service.sh` / `restore.sh` / `uninstall.sh` 的重复内核参数四连写为单写 `uv_target_mv`；
-   - `lib/lock.sh` 关闭 `mkdir` 到写 `pid` 间的瞬时抢锁窗口；`log.sh` 日志截断改用带 PID 后缀的临时文件；`uninstall.sh` 补充清理 `.webui_op.*` / `.webui.last.log` / `.webui.lock`。
-3. **WebUI 交互与文案完善**：
-   - 当 `adsp_orig.txt` 已有合法原厂值（3000~5000 mV）时，历史残留的 `adsp_orig.bad` 仅作为信息提示展示，不再永久屏蔽绿色正常状态横幅；
-   - 补全 `CODE_TEXT` 缺失错误码映射（`invalid_range`、`readback_mismatch`、`override_failed`、`usage`），修正 `NO_ADSP_WRITE` 的按钮禁用范围与刷新 toast 触发时机。
+- **问题根因**：驱动 `oplus_comm_ui_soc_update_work` 中的 `keep_soc_2` 防掉电守卫以 `GAUGE_TERM_VOLTAGE + 30 mV` 作为阈值。`v12.1` 将 `GAUGE_TERM_VOLTAGE` 覆写为派生学习值 `2540 mV` 后，`keep_soc_2` 阈值被拉低至 `2570 mV`，导致电压跌破 `2800 mV` 触发低电倒计时后仍被强行锁回 `ui_soc = 2%`，直到电压跌至 `2600 mV` 附近才放行关机。
+- **修复方案**：
+  - 将 `GAUGE_TERM_VOLTAGE` 覆写值对齐至 `uv_target_mv`（`V_s`，如 `2800 mV`），与 `GAUGE_SHUTDOWN_VOLTAGE` / `TARGET_SHUTDOWN_VOLTAGE` 一致，使 `keep_soc_2`（`2830 mV`）与 `low_battery_control` 不再阻断按设定电压关机；
+  - 保留 ADSP 侧与 `kp_term_get` / `kp_term_set` / `adsp_write` 路径为派生学习值 `uv_term_mv`（`2540 mV`），确保 ADSP 继续按写入值调节电量计算模型；
+  - `TARGET_TERM_VOLTAGE` 保持为 `uv_term_mv`（`2540 mV`），与 `kp_term_get` 读出值一致，避免 `oplus_gauge_get_ddrc_status` 误判漂移并重复写入 `last_cc`。
 
 ---
 
-## 三、开源仓库测试链路修复与 CI 加固
+## 二、v12.1 审计回归修复
 
-- 修复 [自动化测试矩阵/dev/webui_host_smoke.sh](自动化测试矩阵/dev/webui_host_smoke.sh)（扩充至 16 项断言）、[自动化测试矩阵/dt_inject/run_cases.py](自动化测试矩阵/dt_inject/run_cases.py) 与 [自动化测试矩阵/dt_inject/mk_v0order_variant.py](自动化测试矩阵/dt_inject/mk_v0order_variant.py) 路径解析，在开源仓库结构下可直接一键运行通过。
-- [.github/workflows/release.yml](.github/workflows/release.yml) 接入打包前离线自检（`sh -n`、`node --check`、`webui_host_smoke.sh`、`dt_inject/run_cases.py`）。
-- 清理仓库中多余的 `uvprobe` 编译中间产物与实验临时脚本，更新 `.gitignore` 与技术文档。
-- 一加 13（ColorOS 16 / 内核 `6.6.118` / 标准 LKM 路线）实机回归测试全部通过（`run.sh --with-dt` 非重启组 + 宿主离线测试 **PASS 25 · FAIL 0**，WebUI 在线调压与功能开关端到端验证通过）。
+1. **拆分 `adsp_read` 与 `adsp_write` 原子锁（`uv2800.c`）**：
+   - 将原先共用的单把 `uv_adsp_busy` 拆分为独立的 `uv_adsp_read_busy` 与 `uv_adsp_write_busy`（仍采用零外部符号的编译器内建原子原语，严格维持 9 符号最小 KMI 集），消除 WebUI 状态轮询（`adsp_read`）与 `service.sh` / `restore.sh` / `write-adsp` 写入（`adsp_write`）并发冲突返回 `-EBUSY` 的隐患。
+2. **修复 `_uv_read_trimmed()` 读失败泄漏旧值（`lib/common.sh`）**：
+   - 在 `IFS= read -r _uvrt_v < "$1"` 前显式清空 `_uvrt_v=""`，杜绝文件打开/读取失败时因残留上一次读值导致 `[ -n "$_uvrt_v" ]` 误判成功的回归，并在 [自动化测试矩阵/dev/webui_host_smoke.sh](自动化测试矩阵/dev/webui_host_smoke.sh) 补充对应回归断言。
+
+---
+
+## 三、构建与自检摘要
+
+- `uv2800.ko`：`vermagic=6.6.118-4k-g6028f47fadda`，`.gnu.linkonce.this_module=000600`，KMI 符号严格保持最小 7 项（`module_layout`、`_printk`、`register_kprobe`、`unregister_kprobe`、`kstrtoint`、`__stack_chk_fail`、`param_ops_bool`）。
+- 宿主侧语法自检（`sh -n`、`node --check`）、[自动化测试矩阵/dev/webui_host_smoke.sh](自动化测试矩阵/dev/webui_host_smoke.sh)（18 项断言全部 PASS）与 [自动化测试矩阵/dt_inject/run_cases.py](自动化测试矩阵/dt_inject/run_cases.py)（13/13 PASS）全部通过。

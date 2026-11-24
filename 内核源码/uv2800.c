@@ -184,20 +184,21 @@ static int   uv_last_volt;                  /* 最近一次通过 adsp_write 写
 static int   uv_adsp_raw;                   /* 最近一次直读到的 ADSP 终止电压 */
 static struct task_struct *uv_self_write_task; /* 本模块发起 setter 的任务指针 */
 static struct task_struct *uv_self_read_task;  /* 本模块发起 getter 的任务指针 */
-static int uv_adsp_busy;
+static int uv_adsp_write_busy;
+static int uv_adsp_read_busy;
 
 /* 使用编译器内建原子原语，避免依赖 ARM64 LSE alternatives 符号（保持 9 符号最小 KMI 集） */
-static inline bool uv_adsp_trylock(void)
+static inline bool uv_busy_trylock(int *flag)
 {
 	int expected = 0;
 
-	return __atomic_compare_exchange_n(&uv_adsp_busy, &expected, 1, false,
+	return __atomic_compare_exchange_n(flag, &expected, 1, false,
 					   __ATOMIC_ACQ_REL, __ATOMIC_RELAXED);
 }
 
-static inline void uv_adsp_unlock(void)
+static inline void uv_busy_unlock(int *flag)
 {
-	__atomic_store_n(&uv_adsp_busy, 0, __ATOMIC_RELEASE);
+	__atomic_store_n(flag, 0, __ATOMIC_RELEASE);
 }
 
 static noinline void *uv_kprobe_sym(const char *sym)
@@ -284,7 +285,12 @@ static int uv_detect_profile(void)
 /*
  * votable 覆写：
  * 驱动的电压 votable 聚合策略均为 VOTE_MAX，普通投票无法压低原厂高阈值，
- * 需通过 vote_override 强制指定 TERM 与 SHUTDOWN 的有效票值。
+ * 需通过 vote_override 强制指定有效票值：
+ *   - TARGET_TERM_VOLTAGE     -> uv_term_mv（与 kp_term_get 返回值一致，避免 ddrc_status 误判漂移）
+ *   - GAUGE_TERM_VOLTAGE      -> uv_target_mv（与 V_s 对齐，防止 keep_soc_2 将 ui_soc 锁死在 2%；
+ *                                回调下发到 setter 时由 kp_term_set 拦回 uv_term_mv，ADSP 仍按 T 学习）
+ *   - GAUGE_SHUTDOWN_VOLTAGE  -> uv_target_mv（V_s）
+ *   - TARGET_SHUTDOWN_VOLTAGE -> uv_target_mv（V_s）
  */
 static void *uv_find_votable_fn;
 static void *uv_vote_override_fn;
@@ -293,8 +299,8 @@ static int uv_override_last_mv;
 static int uv_override_last_term;
 
 static const char * const uv_override_names[] = {
-	"GAUGE_TERM_VOLTAGE",
 	"TARGET_TERM_VOLTAGE",
+	"GAUGE_TERM_VOLTAGE",
 	"GAUGE_SHUTDOWN_VOLTAGE",
 	"TARGET_SHUTDOWN_VOLTAGE",
 };
@@ -339,7 +345,7 @@ static void uv_override_apply(void)
 
 	for (i = 0; i < ARRAY_SIZE(uv_override_names); i++) {
 		void *v = uv_call_find_votable(uv_override_names[i], find_fn);
-		int mv = (i < 2) ? term : target;
+		int mv = (i == 0) ? term : target;
 		int rc;
 
 		if (!v)
@@ -357,7 +363,7 @@ static void uv_override_apply(void)
 	WRITE_ONCE(uv_override_ok, ok);
 	if (found && (uv_override_last_mv != target ||
 		      uv_override_last_term != term || !ok)) {
-		pr_info("uv2800: votable override %d/%d (expected %d) term=%d shutdown=%d mV\n",
+		pr_info("uv2800: votable override %d/%d (expected %d) target_term=%d gauge_term/shutdown=%d mV\n",
 			found, (int)ARRAY_SIZE(uv_override_names),
 			expected, term, target);
 		uv_override_last_mv = target;
@@ -529,7 +535,7 @@ static int uv_adsp_write_set(const char *val, const struct kernel_param *kp)
 		return -EAGAIN;
 	}
 
-	if (!uv_adsp_trylock())
+	if (!uv_busy_trylock(&uv_adsp_write_busy))
 		return -EBUSY;
 
 	WRITE_ONCE(uv_self_write_task, current);
@@ -538,7 +544,7 @@ static int uv_adsp_write_set(const char *val, const struct kernel_param *kp)
 	else
 		rc = uv_call_setter_val(dev, v, set_addr);
 	WRITE_ONCE(uv_self_write_task, NULL);
-	uv_adsp_unlock();
+	uv_busy_unlock(&uv_adsp_write_busy);
 
 	if (rc < 0) {
 		pr_warn("uv2800: [adsp_write] 写 %d mV 失败，返回 %d\n", v, rc);
@@ -583,13 +589,13 @@ static int uv_adsp_read_set(const char *val, const struct kernel_param *kp)
 		return -EAGAIN;
 	}
 
-	if (!uv_adsp_trylock())
+	if (!uv_busy_trylock(&uv_adsp_read_busy))
 		return -EBUSY;
 
 	WRITE_ONCE(uv_self_read_task, current);
 	rc = uv_call_getter(dev, &out, get_addr);
 	WRITE_ONCE(uv_self_read_task, NULL);
-	uv_adsp_unlock();
+	uv_busy_unlock(&uv_adsp_read_busy);
 
 	if (rc < 0) {
 		WRITE_ONCE(uv_adsp_raw, 0);

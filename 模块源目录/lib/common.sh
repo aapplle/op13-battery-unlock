@@ -27,6 +27,7 @@ _uv_strip_zeros() {
 # 单行短文件读取并去除空白/回车，结果写入 _UV_RET（零子进程开销）
 _uv_read_trimmed() {
     _UV_RET=""
+    _uvrt_v=""
     [ -r "$1" ] || return 1
     IFS= read -r _uvrt_v < "$1" 2>/dev/null || [ -n "$_uvrt_v" ] || return 1
     while :; do

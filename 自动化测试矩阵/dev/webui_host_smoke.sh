@@ -56,6 +56,14 @@ echo 2540 > "$P/uv_term_mv"
 [ "$(_uv_derived 3060)" = "3060" ] && ok "_uv_derived 3060=3060" || bad "_uv_derived 3060"
 [ "$(_uv_derived 3250)" = "3250" ] && ok "_uv_derived 3250=3250 (no amplification)" || bad "_uv_derived 3250"
 
+# _uv_read_trimmed 回归：读取有效文件后再读缺失/不可读文件，不得残留上次读值
+_uv_read_trimmed "$P/uv_term_mv" && [ "$_UV_RET" = "2540" ] && ok "_uv_read_trimmed valid=2540" || bad "_uv_read_trimmed valid"
+if _uv_read_trimmed "$P/nonexistent_file" || [ -n "$_UV_RET" ]; then
+    bad "_uv_read_trimmed nonexistent leaked [$_UV_RET]"
+else
+    ok "_uv_read_trimmed nonexistent returns 1 without stale value"
+fi
+
 # features.sh 分支：用临时目录 + stub，不碰真机
 BK="$T"; XML="$T/devicepolicy.xml"; KEY=test_key
 CS="$T/chip_soc"; CAP="$T/capacity"; CAPUE="$T/uevent"
